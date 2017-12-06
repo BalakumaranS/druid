@@ -22,41 +22,42 @@ package io.druid.indexing.firehose;
 import com.fasterxml.jackson.annotation.JacksonInject;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Throwables;
+import com.google.common.collect.BiMap;
+import com.google.common.collect.HashBiMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
-import com.google.common.collect.Ordering;
-import com.google.common.collect.Sets;
-import com.google.inject.Injector;
-import com.metamx.common.parsers.ParseException;
 import com.metamx.emitter.EmittingLogger;
 import io.druid.data.input.Firehose;
 import io.druid.data.input.FirehoseFactory;
 import io.druid.data.input.impl.InputRowParser;
-import io.druid.granularity.QueryGranularity;
 import io.druid.indexing.common.TaskToolbox;
-import io.druid.indexing.common.TaskToolboxFactory;
 import io.druid.indexing.common.actions.SegmentListUsedAction;
-import io.druid.indexing.common.task.NoopTask;
+import io.druid.java.util.common.parsers.ParseException;
 import io.druid.query.filter.DimFilter;
 import io.druid.segment.IndexIO;
 import io.druid.segment.QueryableIndexStorageAdapter;
 import io.druid.segment.loading.SegmentLoadingException;
 import io.druid.segment.realtime.firehose.IngestSegmentFirehose;
 import io.druid.segment.realtime.firehose.WindowedStorageAdapter;
+import io.druid.segment.transform.TransformSpec;
 import io.druid.timeline.DataSegment;
 import io.druid.timeline.TimelineObjectHolder;
 import io.druid.timeline.VersionedIntervalTimeline;
 import io.druid.timeline.partition.PartitionChunk;
 import org.joda.time.Interval;
 
+import javax.annotation.Nullable;
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 public class IngestSegmentFirehoseFactory implements FirehoseFactory<InputRowParser>
 {
@@ -66,8 +67,8 @@ public class IngestSegmentFirehoseFactory implements FirehoseFactory<InputRowPar
   private final DimFilter dimFilter;
   private final List<String> dimensions;
   private final List<String> metrics;
-  private final Injector injector;
   private final IndexIO indexIO;
+  private TaskToolbox taskToolbox;
 
   @JsonCreator
   public IngestSegmentFirehoseFactory(
@@ -76,7 +77,6 @@ public class IngestSegmentFirehoseFactory implements FirehoseFactory<InputRowPar
       @JsonProperty("filter") DimFilter dimFilter,
       @JsonProperty("dimensions") List<String> dimensions,
       @JsonProperty("metrics") List<String> metrics,
-      @JacksonInject Injector injector,
       @JacksonInject IndexIO indexIO
   )
   {
@@ -87,7 +87,6 @@ public class IngestSegmentFirehoseFactory implements FirehoseFactory<InputRowPar
     this.dimFilter = dimFilter;
     this.dimensions = dimensions;
     this.metrics = metrics;
-    this.injector = injector;
     this.indexIO = Preconditions.checkNotNull(indexIO, "null IndexIO");
   }
 
@@ -121,115 +120,40 @@ public class IngestSegmentFirehoseFactory implements FirehoseFactory<InputRowPar
     return metrics;
   }
 
+  public void setTaskToolbox(TaskToolbox taskToolbox)
+  {
+    this.taskToolbox = taskToolbox;
+  }
+
   @Override
-  public Firehose connect(InputRowParser inputRowParser) throws IOException, ParseException
+  public Firehose connect(InputRowParser inputRowParser, File temporaryDirectory) throws IOException, ParseException
   {
     log.info("Connecting firehose: dataSource[%s], interval[%s]", dataSource, interval);
-    // better way to achieve this is to pass toolbox to Firehose, The instance is initialized Lazily on connect method.
-    // Noop Task is just used to create the toolbox and list segments.
-    final TaskToolbox toolbox = injector.getInstance(TaskToolboxFactory.class).build(
-        new NoopTask("reingest", 0, 0, null, null, null)
-    );
+
+    Preconditions.checkNotNull(taskToolbox, "taskToolbox is not set");
 
     try {
-      final List<DataSegment> usedSegments = toolbox
+      final List<DataSegment> usedSegments = taskToolbox
           .getTaskActionClient()
           .submit(new SegmentListUsedAction(dataSource, interval, null));
-      final Map<DataSegment, File> segmentFileMap = toolbox.fetchSegments(usedSegments);
-      VersionedIntervalTimeline<String, DataSegment> timeline = new VersionedIntervalTimeline<>(
-          Ordering.<String>natural().nullsFirst()
-      );
-
-      for (DataSegment segment : usedSegments) {
-        timeline.add(segment.getInterval(), segment.getVersion(), segment.getShardSpec().createChunk(segment));
-      }
-      final List<TimelineObjectHolder<String, DataSegment>> timeLineSegments = timeline.lookup(
-          interval
-      );
+      final Map<DataSegment, File> segmentFileMap = taskToolbox.fetchSegments(usedSegments);
+      final List<TimelineObjectHolder<String, DataSegment>> timeLineSegments = VersionedIntervalTimeline
+          .forSegments(usedSegments)
+          .lookup(interval);
 
       final List<String> dims;
       if (dimensions != null) {
         dims = dimensions;
       } else if (inputRowParser.getParseSpec().getDimensionsSpec().hasCustomDimensions()) {
-        dims = inputRowParser.getParseSpec().getDimensionsSpec().getDimensions();
+        dims = inputRowParser.getParseSpec().getDimensionsSpec().getDimensionNames();
       } else {
-        Set<String> dimSet = Sets.newHashSet(
-            Iterables.concat(
-                Iterables.transform(
-                    timeLineSegments,
-                    new Function<TimelineObjectHolder<String, DataSegment>, Iterable<String>>()
-                    {
-                      @Override
-                      public Iterable<String> apply(
-                          TimelineObjectHolder<String, DataSegment> timelineObjectHolder
-                      )
-                      {
-                        return Iterables.concat(
-                            Iterables.transform(
-                                timelineObjectHolder.getObject(),
-                                new Function<PartitionChunk<DataSegment>, Iterable<String>>()
-                                {
-                                  @Override
-                                  public Iterable<String> apply(PartitionChunk<DataSegment> input)
-                                  {
-                                    return input.getObject().getDimensions();
-                                  }
-                                }
-                            )
-                        );
-                      }
-                    }
-
-                )
-            )
-        );
-        dims = Lists.newArrayList(
-            Sets.difference(
-                dimSet,
-                inputRowParser
-                    .getParseSpec()
-                    .getDimensionsSpec()
-                    .getDimensionExclusions()
-            )
+        dims = getUniqueDimensions(
+            timeLineSegments,
+            inputRowParser.getParseSpec().getDimensionsSpec().getDimensionExclusions()
         );
       }
 
-      final List<String> metricsList;
-      if (metrics != null) {
-        metricsList = metrics;
-      } else {
-        Set<String> metricsSet = Sets.newHashSet(
-            Iterables.concat(
-                Iterables.transform(
-                    timeLineSegments,
-                    new Function<TimelineObjectHolder<String, DataSegment>, Iterable<String>>()
-                    {
-                      @Override
-                      public Iterable<String> apply(
-                          TimelineObjectHolder<String, DataSegment> input
-                      )
-                      {
-                        return Iterables.concat(
-                            Iterables.transform(
-                                input.getObject(),
-                                new Function<PartitionChunk<DataSegment>, Iterable<String>>()
-                                {
-                                  @Override
-                                  public Iterable<String> apply(PartitionChunk<DataSegment> input)
-                                  {
-                                    return input.getObject().getMetrics();
-                                  }
-                                }
-                            )
-                        );
-                      }
-                    }
-                )
-            )
-        );
-        metricsList = Lists.newArrayList(metricsSet);
-      }
-
+      final List<String> metricsList = metrics == null ? getUniqueMetrics(timeLineSegments) : metrics;
 
       final List<WindowedStorageAdapter> adapters = Lists.newArrayList(
           Iterables.concat(
@@ -274,14 +198,69 @@ public class IngestSegmentFirehoseFactory implements FirehoseFactory<InputRowPar
           )
       );
 
-      return new IngestSegmentFirehose(adapters, dims, metricsList, dimFilter, QueryGranularity.NONE);
+      final TransformSpec transformSpec = TransformSpec.fromInputRowParser(inputRowParser);
+      return new IngestSegmentFirehose(adapters, transformSpec, dims, metricsList, dimFilter);
     }
-    catch (IOException e) {
+    catch (IOException | SegmentLoadingException e) {
       throw Throwables.propagate(e);
     }
-    catch (SegmentLoadingException e) {
-      throw Throwables.propagate(e);
+  }
+
+  @VisibleForTesting
+  static List<String> getUniqueDimensions(
+      List<TimelineObjectHolder<String, DataSegment>> timelineSegments,
+      @Nullable Set<String> excludeDimensions
+  )
+  {
+    final BiMap<String, Integer> uniqueDims = HashBiMap.create();
+
+    // Here, we try to retain the order of dimensions as they were specified since the order of dimensions may be
+    // optimized for performance.
+    // Dimensions are extracted from the recent segments to olders because recent segments are likely to be queried more
+    // frequently, and thus the performance should be optimized for recent ones rather than old ones.
+
+    // timelineSegments are sorted in order of interval
+    int index = 0;
+    for (TimelineObjectHolder<String, DataSegment> timelineHolder : Lists.reverse(timelineSegments)) {
+      for (PartitionChunk<DataSegment> chunk : timelineHolder.getObject()) {
+        for (String dimension : chunk.getObject().getDimensions()) {
+          if (!uniqueDims.containsKey(dimension) &&
+              (excludeDimensions == null || !excludeDimensions.contains(dimension))) {
+            uniqueDims.put(dimension, index++);
+          }
+        }
+      }
     }
 
+    final BiMap<Integer, String> orderedDims = uniqueDims.inverse();
+    return IntStream.range(0, orderedDims.size())
+                    .mapToObj(orderedDims::get)
+                    .collect(Collectors.toList());
+  }
+
+  @VisibleForTesting
+  static List<String> getUniqueMetrics(List<TimelineObjectHolder<String, DataSegment>> timelineSegments)
+  {
+    final BiMap<String, Integer> uniqueMetrics = HashBiMap.create();
+
+    // Here, we try to retain the order of metrics as they were specified. Metrics are extracted from the recent
+    // segments to olders.
+
+    // timelineSegments are sorted in order of interval
+    int index = 0;
+    for (TimelineObjectHolder<String, DataSegment> timelineHolder : Lists.reverse(timelineSegments)) {
+      for (PartitionChunk<DataSegment> chunk : timelineHolder.getObject()) {
+        for (String metric : chunk.getObject().getMetrics()) {
+          if (!uniqueMetrics.containsKey(metric)) {
+            uniqueMetrics.put(metric, index++);
+          }
+        }
+      }
+    }
+
+    final BiMap<Integer, String> orderedMetrics = uniqueMetrics.inverse();
+    return IntStream.range(0, orderedMetrics.size())
+        .mapToObj(orderedMetrics::get)
+        .collect(Collectors.toList());
   }
 }

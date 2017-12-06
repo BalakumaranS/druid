@@ -19,23 +19,36 @@
 
 package io.druid.segment.data;
 
+import io.druid.guice.annotations.ExtensionPoint;
+import io.druid.segment.writeout.WriteOutBytes;
+
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Comparator;
 
+@ExtensionPoint
 public interface ObjectStrategy<T> extends Comparator<T>
 {
-  public Class<? extends T> getClazz();
+  Class<? extends T> getClazz();
 
   /**
    * Convert values from their underlying byte representation.
    *
-   * Implementations of this method must not change the given buffer mark, or limit, but may modify its position.
-   * Use buffer.asReadOnlyBuffer() or buffer.duplicate() if mark or limit need to be set.
+   * Implementations of this method <i>may</i> change the given buffer's mark, or limit, and position.
+   *
+   * Implementations of this method <i>may not</i> store the given buffer in a field of the "deserialized" object,
+   * need to use {@link ByteBuffer#slice()}, {@link ByteBuffer#asReadOnlyBuffer()} or {@link ByteBuffer#duplicate()} in
+   * this case.
    *
    * @param buffer buffer to read value from
    * @param numBytes number of bytes used to store the value, starting at buffer.position()
    * @return an object created from the given byte buffer representation
    */
-  public T fromByteBuffer(ByteBuffer buffer, int numBytes);
-  public byte[] toBytes(T val);
+  T fromByteBuffer(ByteBuffer buffer, int numBytes);
+  byte[] toBytes(T val);
+
+  default void writeTo(T val, WriteOutBytes out) throws IOException
+  {
+    out.write(toBytes(val));
+  }
 }

@@ -6,13 +6,13 @@ Segments
 
 Druid stores its index in *segment files*, which are partitioned by
 time. In a basic setup, one segment file is created for each time
-interval, where the time inteval is configurable in the
+interval, where the time interval is configurable in the
 `segmentGranularity` parameter of the `granularitySpec`, which is
 documented [here](../ingestion/batch-ingestion.html).  For druid to
 operate well under heavy query load, it is important for the segment
 file size to be within the recommended range of 300mb-700mb. If your
 segment files are larger than this range, then consider either
-changing the the granularity of the time interval or partitioning your
+changing the granularity of the time interval or partitioning your
 data and tweaking the `targetPartitionSize` in your `partitioningSpec`
 (a good starting point for this parameter is 5 million rows).  See the
 sharding section below and the 'Partitioning specification' section of
@@ -163,7 +163,7 @@ Each column is stored as two parts:
 1.  A Jackson-serialized ColumnDescriptor
 2.  The rest of the binary for the column
 
-A ColumnDescriptor is essentially an object that allows us to use jackson’s polymorphic deserialization to add new and interesting methods of serialization with minimal impact to the code. It consists of some metadata about the column (what type is it, is it multi-valued, etc.) and then a list of serde logic that can deserialize the rest of the binary.
+A ColumnDescriptor is essentially an object that allows us to use jackson’s polymorphic deserialization to add new and interesting methods of serialization with minimal impact to the code. It consists of some metadata about the column (what type is it, is it multi-value, etc.) and then a list of serde logic that can deserialize the rest of the binary.
 
 Sharding Data to Create Segments
 --------------------------------

@@ -26,14 +26,23 @@ import io.druid.timeline.DataSegment;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.URI;
+import java.util.Map;
 import java.util.Set;
 
 public class TestDataSegmentPusher implements DataSegmentPusher
 {
   private final Set<DataSegment> pushedSegments = Sets.newConcurrentHashSet();
 
+  @Deprecated
   @Override
   public String getPathForHadoop(String dataSource)
+  {
+    return getPathForHadoop();
+  }
+
+  @Override
+  public String getPathForHadoop()
   {
     throw new UnsupportedOperationException();
   }
@@ -43,6 +52,12 @@ public class TestDataSegmentPusher implements DataSegmentPusher
   {
     pushedSegments.add(segment);
     return segment;
+  }
+
+  @Override
+  public Map<String, Object> makeLoadSpec(URI uri)
+  {
+    throw new UnsupportedOperationException();
   }
 
   public Set<DataSegment> getPushedSegments()

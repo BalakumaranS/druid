@@ -21,38 +21,49 @@ package io.druid.segment.incremental;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
-import com.google.common.base.Strings;
 import com.google.common.base.Supplier;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.primitives.Ints;
 import com.google.common.primitives.Longs;
-import com.metamx.common.IAE;
-import com.metamx.common.ISE;
+import io.druid.collections.NonBlockingPool;
+import io.druid.common.guava.GuavaUtils;
 import io.druid.data.input.InputRow;
 import io.druid.data.input.MapBasedRow;
 import io.druid.data.input.Row;
+import io.druid.data.input.impl.DimensionSchema;
 import io.druid.data.input.impl.DimensionsSpec;
 import io.druid.data.input.impl.SpatialDimensionSchema;
-import io.druid.granularity.QueryGranularity;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.IAE;
+import io.druid.java.util.common.ISE;
+import io.druid.java.util.common.StringUtils;
+import io.druid.java.util.common.granularity.Granularity;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.PostAggregator;
 import io.druid.query.dimension.DimensionSpec;
-import io.druid.query.extraction.ExtractionFn;
+import io.druid.query.groupby.RowBasedColumnSelectorFactory;
+import io.druid.query.monomorphicprocessing.RuntimeShapeInspector;
 import io.druid.segment.ColumnSelectorFactory;
+import io.druid.segment.ColumnValueSelector;
+import io.druid.segment.DimensionHandler;
+import io.druid.segment.DimensionHandlerUtils;
+import io.druid.segment.DimensionIndexer;
 import io.druid.segment.DimensionSelector;
+import io.druid.segment.DoubleColumnSelector;
 import io.druid.segment.FloatColumnSelector;
 import io.druid.segment.LongColumnSelector;
 import io.druid.segment.Metadata;
+import io.druid.segment.NilColumnValueSelector;
 import io.druid.segment.ObjectColumnSelector;
+import io.druid.segment.VirtualColumns;
 import io.druid.segment.column.Column;
 import io.druid.segment.column.ColumnCapabilities;
 import io.druid.segment.column.ColumnCapabilitiesImpl;
 import io.druid.segment.column.ValueType;
-import io.druid.segment.data.Indexed;
-import io.druid.segment.data.IndexedInts;
 import io.druid.segment.serde.ComplexMetricExtractor;
 import io.druid.segment.serde.ComplexMetricSerde;
 import io.druid.segment.serde.ComplexMetrics;
@@ -62,15 +73,22 @@ import org.joda.time.Interval;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 import java.io.Closeable;
-import java.io.IOException;
+import java.lang.reflect.Array;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ConcurrentNavigableMap;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -80,85 +98,75 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
 {
   private volatile DateTime maxIngestedEventTime;
 
+  // Used to discover ValueType based on the class of values in a row
+  // Also used to convert between the duplicate ValueType enums in DimensionSchema (druid-api) and main druid.
+  public static final Map<Object, ValueType> TYPE_MAP = ImmutableMap.<Object, ValueType>builder()
+      .put(Long.class, ValueType.LONG)
+      .put(Double.class, ValueType.DOUBLE)
+      .put(Float.class, ValueType.FLOAT)
+      .put(String.class, ValueType.STRING)
+      .put(DimensionSchema.ValueType.LONG, ValueType.LONG)
+      .put(DimensionSchema.ValueType.FLOAT, ValueType.FLOAT)
+      .put(DimensionSchema.ValueType.STRING, ValueType.STRING)
+      .put(DimensionSchema.ValueType.DOUBLE, ValueType.DOUBLE)
+      .build();
+
+  /**
+   * Column selector used at ingestion time for inputs to aggregators.
+   *
+   * @param agg                       the aggregator
+   * @param in                        ingestion-time input row supplier
+   * @param deserializeComplexMetrics whether complex objects should be deserialized by a {@link ComplexMetricExtractor}
+   *
+   * @return column selector factory
+   */
   public static ColumnSelectorFactory makeColumnSelectorFactory(
+      final VirtualColumns virtualColumns,
       final AggregatorFactory agg,
       final Supplier<InputRow> in,
       final boolean deserializeComplexMetrics
   )
   {
-    return new ColumnSelectorFactory()
+    final RowBasedColumnSelectorFactory baseSelectorFactory = RowBasedColumnSelectorFactory.create(in, null);
+
+    class IncrementalIndexInputRowColumnSelectorFactory implements ColumnSelectorFactory
     {
       @Override
-      public LongColumnSelector makeLongColumnSelector(final String columnName)
-      {
-        if (columnName.equals(Column.TIME_COLUMN_NAME)) {
-          return new LongColumnSelector()
-          {
-            @Override
-            public long get()
-            {
-              return in.get().getTimestampFromEpoch();
-            }
-          };
-        }
-        return new LongColumnSelector()
-        {
-          @Override
-          public long get()
-          {
-            return in.get().getLongMetric(columnName);
-          }
-        };
-      }
-
-      @Override
-      public FloatColumnSelector makeFloatColumnSelector(final String columnName)
-      {
-        return new FloatColumnSelector()
-        {
-          @Override
-          public float get()
-          {
-            return in.get().getFloatMetric(columnName);
-          }
-        };
-      }
-
-      @Override
-      public ObjectColumnSelector makeObjectColumnSelector(final String column)
+      public ColumnValueSelector<?> makeColumnValueSelector(final String column)
       {
         final String typeName = agg.getTypeName();
-
-        final ObjectColumnSelector<Object> rawColumnSelector = new ObjectColumnSelector<Object>()
-        {
-          @Override
-          public Class classOfObject()
-          {
-            return Object.class;
-          }
-
-          @Override
-          public Object get()
-          {
-            return in.get().getRaw(column);
-          }
-        };
-
-        if (!deserializeComplexMetrics) {
-          return rawColumnSelector;
+        boolean isComplexMetric =
+            GuavaUtils.getEnumIfPresent(ValueType.class, StringUtils.toUpperCase(typeName)) == null ||
+            typeName.equalsIgnoreCase(ValueType.COMPLEX.name());
+        if (!isComplexMetric || !deserializeComplexMetrics) {
+          return baseSelectorFactory.makeColumnValueSelector(column);
         } else {
-          if (typeName.equals("float")) {
-            return rawColumnSelector;
-          }
-
           final ComplexMetricSerde serde = ComplexMetrics.getSerdeForType(typeName);
           if (serde == null) {
             throw new ISE("Don't know how to handle type[%s]", typeName);
           }
 
           final ComplexMetricExtractor extractor = serde.getExtractor();
-          return new ObjectColumnSelector()
+          return new ColumnValueSelector()
           {
+            @Override
+            public long getLong()
+            {
+              return in.get().getMetric(column).longValue();
+            }
+
+            @Override
+            public float getFloat()
+            {
+              return in.get().getMetric(column).floatValue();
+            }
+
+            @Override
+            public double getDouble()
+            {
+              return in.get().getMetric(column).doubleValue();
+            }
+
             @Override
             public Class classOfObject()
             {
@@ -166,151 +174,98 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
             }
 
             @Override
-            public Object get()
+            public Object getObject()
             {
               return extractor.extractValue(in.get(), column);
+            }
+
+            @Override
+            public void inspectRuntimeShape(RuntimeShapeInspector inspector)
+            {
+              inspector.visit("in", in);
+              inspector.visit("extractor", extractor);
             }
           };
         }
       }
 
       @Override
-      public DimensionSelector makeDimensionSelector(
-          DimensionSpec dimensionSpec
-      )
+      public DimensionSelector makeDimensionSelector(DimensionSpec dimensionSpec)
       {
-        return dimensionSpec.decorate(makeDimensionSelectorUndecorated(dimensionSpec));
+        return baseSelectorFactory.makeDimensionSelector(dimensionSpec);
       }
 
-      private DimensionSelector makeDimensionSelectorUndecorated(
-          DimensionSpec dimensionSpec
-      )
+      @Nullable
+      @Override
+      public ColumnCapabilities getColumnCapabilities(String columnName)
       {
-        final String dimension = dimensionSpec.getDimension();
-        final ExtractionFn extractionFn = dimensionSpec.getExtractionFn();
-
-        return new DimensionSelector()
-        {
-          @Override
-          public IndexedInts getRow()
-          {
-            final List<String> dimensionValues = in.get().getDimension(dimension);
-            final ArrayList<Integer> vals = Lists.newArrayList();
-            if (dimensionValues != null) {
-              for (int i = 0; i < dimensionValues.size(); ++i) {
-                vals.add(i);
-              }
-            }
-
-            return new IndexedInts()
-            {
-              @Override
-              public int size()
-              {
-                return vals.size();
-              }
-
-              @Override
-              public int get(int index)
-              {
-                return vals.get(index);
-              }
-
-              @Override
-              public Iterator<Integer> iterator()
-              {
-                return vals.iterator();
-              }
-
-              @Override
-              public void close() throws IOException
-              {
-
-              }
-
-              @Override
-              public void fill(int index, int[] toFill)
-              {
-                throw new UnsupportedOperationException("fill not supported");
-              }
-            };
-          }
-
-          @Override
-          public int getValueCardinality()
-          {
-            throw new UnsupportedOperationException("value cardinality is unknown in incremental index");
-          }
-
-          @Override
-          public String lookupName(int id)
-          {
-            final String value = in.get().getDimension(dimension).get(id);
-            return extractionFn == null ? value : extractionFn.apply(value);
-          }
-
-          @Override
-          public int lookupId(String name)
-          {
-            if (extractionFn != null) {
-              throw new UnsupportedOperationException("cannot perform lookup when applying an extraction function");
-            }
-            return in.get().getDimension(dimension).indexOf(name);
-          }
-        };
+        return baseSelectorFactory.getColumnCapabilities(columnName);
       }
-    };
+    }
+
+    return virtualColumns.wrap(new IncrementalIndexInputRowColumnSelectorFactory());
   }
 
   private final long minTimestamp;
-  private final QueryGranularity gran;
+  private final Granularity gran;
+  private final boolean rollup;
   private final List<Function<InputRow, InputRow>> rowTransformers;
+  private final VirtualColumns virtualColumns;
   private final AggregatorFactory[] metrics;
   private final AggregatorType[] aggs;
   private final boolean deserializeComplexMetrics;
+  private final boolean reportParseExceptions;
   private final Metadata metadata;
 
   private final Map<String, MetricDesc> metricDescs;
-  private final Map<String, DimensionDesc> dimensionDescs;
-  private final Map<String, ColumnCapabilitiesImpl> columnCapabilities;
-  private final List<DimDim> dimValues;
 
+  private final Map<String, DimensionDesc> dimensionDescs;
+  private final List<DimensionDesc> dimensionDescsList;
+  private final Map<String, ColumnCapabilitiesImpl> columnCapabilities;
   private final AtomicInteger numEntries = new AtomicInteger();
 
   // This is modified on add() in a critical section.
   private final ThreadLocal<InputRow> in = new ThreadLocal<>();
-  private final Supplier<InputRow> rowSupplier = new Supplier<InputRow>()
-  {
-    @Override
-    public InputRow get()
-    {
-      return in.get();
-    }
-  };
+  private final Supplier<InputRow> rowSupplier = in::get;
 
   /**
    * Setting deserializeComplexMetrics to false is necessary for intermediate aggregation such as groupBy that
    * should not deserialize input columns using ComplexMetricSerde for aggregators that return complex metrics.
    *
+   * Set concurrentEventAdd to true to indicate that adding of input row should be thread-safe (for example, groupBy
+   * where the multiple threads can add concurrently to the IncrementalIndex).
+   *
    * @param incrementalIndexSchema    the schema to use for incremental index
    * @param deserializeComplexMetrics flag whether or not to call ComplexMetricExtractor.extractValue() on the input
    *                                  value for aggregators that return metrics other than float.
+   * @param reportParseExceptions     flag whether or not to report ParseExceptions that occur while extracting values
+   *                                  from input rows
+   * @param concurrentEventAdd        flag whether ot not adding of input rows should be thread-safe
    */
-  public IncrementalIndex(
+  protected IncrementalIndex(
       final IncrementalIndexSchema incrementalIndexSchema,
-      final boolean deserializeComplexMetrics
+      final boolean deserializeComplexMetrics,
+      final boolean reportParseExceptions,
+      final boolean concurrentEventAdd
   )
   {
     this.minTimestamp = incrementalIndexSchema.getMinTimestamp();
     this.gran = incrementalIndexSchema.getGran();
+    this.rollup = incrementalIndexSchema.isRollup();
+    this.virtualColumns = incrementalIndexSchema.getVirtualColumns();
     this.metrics = incrementalIndexSchema.getMetrics();
     this.rowTransformers = new CopyOnWriteArrayList<>();
     this.deserializeComplexMetrics = deserializeComplexMetrics;
+    this.reportParseExceptions = reportParseExceptions;
 
-    this.metadata = new Metadata().setAggregators(getCombiningAggregators(metrics));
-
-    this.aggs = initAggs(metrics, rowSupplier, deserializeComplexMetrics);
     this.columnCapabilities = Maps.newHashMap();
+    this.metadata = new Metadata()
+        .setAggregators(getCombiningAggregators(metrics))
+        .setTimestampSpec(incrementalIndexSchema.getTimestampSpec())
+        .setQueryGranularity(this.gran)
+        .setRollup(this.rollup);
+
+    this.aggs = initAggs(metrics, rowSupplier, deserializeComplexMetrics, concurrentEventAdd);
 
     this.metricDescs = Maps.newLinkedHashMap();
     for (AggregatorFactory metric : metrics) {
@@ -320,59 +275,177 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
     }
 
     DimensionsSpec dimensionsSpec = incrementalIndexSchema.getDimensionsSpec();
-
     this.dimensionDescs = Maps.newLinkedHashMap();
-    this.dimValues = Collections.synchronizedList(Lists.<DimDim>newArrayList());
-    for (String dimension : dimensionsSpec.getDimensions()) {
-      ColumnCapabilitiesImpl capabilities = new ColumnCapabilitiesImpl();
-      capabilities.setType(ValueType.STRING);
-      addNewDimension(dimension, capabilities);
-      columnCapabilities.put(dimension, capabilities);
+
+    this.dimensionDescsList = new ArrayList<>();
+    for (DimensionSchema dimSchema : dimensionsSpec.getDimensions()) {
+      ValueType type = TYPE_MAP.get(dimSchema.getValueType());
+      String dimName = dimSchema.getName();
+      ColumnCapabilitiesImpl capabilities = makeCapabilitesFromValueType(type);
+      if (dimSchema.getTypeName().equals(DimensionSchema.SPATIAL_TYPE_NAME)) {
+        capabilities.setHasSpatialIndexes(true);
+      } else {
+        DimensionHandler handler = DimensionHandlerUtils.getHandlerFromCapabilities(
+            dimName,
+            capabilities,
+            dimSchema.getMultiValueHandling()
+        );
+        addNewDimension(dimName, capabilities, handler);
+      }
+      columnCapabilities.put(dimName, capabilities);
     }
+
+    //__time capabilities
+    ColumnCapabilitiesImpl timeCapabilities = new ColumnCapabilitiesImpl();
+    timeCapabilities.setType(ValueType.LONG);
+    columnCapabilities.put(Column.TIME_COLUMN_NAME, timeCapabilities);
 
     // This should really be more generic
     List<SpatialDimensionSchema> spatialDimensions = dimensionsSpec.getSpatialDimensions();
     if (!spatialDimensions.isEmpty()) {
       this.rowTransformers.add(new SpatialDimensionRowTransformer(spatialDimensions));
     }
-    for (SpatialDimensionSchema spatialDimension : spatialDimensions) {
-      ColumnCapabilitiesImpl capabilities = new ColumnCapabilitiesImpl();
-      capabilities.setType(ValueType.STRING);
-      capabilities.setHasSpatialIndexes(true);
-      columnCapabilities.put(spatialDimension.getDimName(), capabilities);
+  }
+
+  public static class Builder
+  {
+    private IncrementalIndexSchema incrementalIndexSchema;
+    private boolean deserializeComplexMetrics;
+    private boolean reportParseExceptions;
+    private boolean concurrentEventAdd;
+    private boolean sortFacts;
+    private int maxRowCount;
+
+    public Builder()
+    {
+      incrementalIndexSchema = null;
+      deserializeComplexMetrics = true;
+      reportParseExceptions = true;
+      concurrentEventAdd = false;
+      sortFacts = true;
+      maxRowCount = 0;
+    }
+
+    public Builder setIndexSchema(final IncrementalIndexSchema incrementalIndexSchema)
+    {
+      this.incrementalIndexSchema = incrementalIndexSchema;
+      return this;
+    }
+
+    /**
+     * A helper method to set a simple index schema with only metrics and default values for the other parameters. Note
+     * that this method is normally used for testing and benchmarking; it is unlikely that you would use it in
+     * production settings.
+     *
+     * @param metrics variable array of {@link AggregatorFactory} metrics
+     *
+     * @return this
+     */
+    @VisibleForTesting
+    public Builder setSimpleTestingIndexSchema(final AggregatorFactory... metrics)
+    {
+      this.incrementalIndexSchema = new IncrementalIndexSchema.Builder()
+          .withMetrics(metrics)
+          .build();
+      return this;
+    }
+
+    public Builder setDeserializeComplexMetrics(final boolean deserializeComplexMetrics)
+    {
+      this.deserializeComplexMetrics = deserializeComplexMetrics;
+      return this;
+    }
+
+    public Builder setReportParseExceptions(final boolean reportParseExceptions)
+    {
+      this.reportParseExceptions = reportParseExceptions;
+      return this;
+    }
+
+    public Builder setConcurrentEventAdd(final boolean concurrentEventAdd)
+    {
+      this.concurrentEventAdd = concurrentEventAdd;
+      return this;
+    }
+
+    public Builder setSortFacts(final boolean sortFacts)
+    {
+      this.sortFacts = sortFacts;
+      return this;
+    }
+
+    public Builder setMaxRowCount(final int maxRowCount)
+    {
+      this.maxRowCount = maxRowCount;
+      return this;
+    }
+
+    public IncrementalIndex buildOnheap()
+    {
+      if (maxRowCount <= 0) {
+        throw new IllegalArgumentException("Invalid max row count: " + maxRowCount);
+      }
+
+      return new OnheapIncrementalIndex(
+          Objects.requireNonNull(incrementalIndexSchema, "incrementIndexSchema is null"),
+          deserializeComplexMetrics,
+          reportParseExceptions,
+          concurrentEventAdd,
+          sortFacts,
+          maxRowCount
+      );
+    }
+
+    public IncrementalIndex buildOffheap(final NonBlockingPool<ByteBuffer> bufferPool)
+    {
+      if (maxRowCount <= 0) {
+        throw new IllegalArgumentException("Invalid max row count: " + maxRowCount);
+      }
+
+      return new OffheapIncrementalIndex(
+          Objects.requireNonNull(incrementalIndexSchema, "incrementalIndexSchema is null"),
+          deserializeComplexMetrics,
+          reportParseExceptions,
+          concurrentEventAdd,
+          sortFacts,
+          maxRowCount,
+          Objects.requireNonNull(bufferPool, "bufferPool is null")
+      );
     }
   }
 
-  private DimDim newDimDim(String dimension)
+  public boolean isRollup()
   {
-    return new NullValueConverterDimDim(makeDimDim(dimension, dimensionDescs));
+    return rollup;
   }
 
-  public abstract ConcurrentNavigableMap<TimeAndDims, Integer> getFacts();
+  public abstract FactsHolder getFacts();
 
   public abstract boolean canAppendRow();
 
   public abstract String getOutOfRowsReason();
 
-  // use newDimDim
-  protected abstract DimDim makeDimDim(String dimension, Object lock);
-
   protected abstract AggregatorType[] initAggs(
       AggregatorFactory[] metrics,
       Supplier<InputRow> rowSupplier,
-      boolean deserializeComplexMetrics
+      boolean deserializeComplexMetrics,
+      boolean concurrentEventAdd
   );
 
   // Note: This method needs to be thread safe.
   protected abstract Integer addToFacts(
       AggregatorFactory[] metrics,
       boolean deserializeComplexMetrics,
+      boolean reportParseExceptions,
       InputRow row,
       AtomicInteger numEntries,
       TimeAndDims key,
       ThreadLocal<InputRow> rowContainer,
-      Supplier<InputRow> rowSupplier
+      Supplier<InputRow> rowSupplier,
+      boolean skipMaxRowsInMemoryCheck
   ) throws IndexSizeExceededException;
+
+  public abstract int getLastRowIndex();
 
   protected abstract AggregatorType[] getAggsForRow(int rowOffset);
 
@@ -384,10 +457,11 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
 
   protected abstract Object getMetricObjectValue(int rowOffset, int aggOffset);
 
+  protected abstract double getMetricDoubleValue(int rowOffset, int aggOffset);
+
   @Override
   public void close()
   {
-    dimValues.clear();
   }
 
   public InputRow formatRow(InputRow row)
@@ -402,6 +476,11 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
     return row;
   }
 
+  public Map<String, ColumnCapabilitiesImpl> getColumnCapabilities()
+  {
+    return columnCapabilities;
+  }
+
   /**
    * Adds a new row.  The row might correspond with another row that already exists, in which case this will
    * update that row instead of inserting a new one.
@@ -414,55 +493,77 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
    *
    * @return the number of rows in the data set after adding the InputRow
    */
-  public int add(InputRow row) throws IndexSizeExceededException {
+  public int add(InputRow row) throws IndexSizeExceededException
+  {
+    return add(row, false);
+  }
+
+  public int add(InputRow row, boolean skipMaxRowsInMemoryCheck) throws IndexSizeExceededException
+  {
     TimeAndDims key = toTimeAndDims(row);
-    final int rv = addToFacts(metrics, deserializeComplexMetrics, row, numEntries, key, in, rowSupplier);
+    final int rv = addToFacts(
+        metrics,
+        deserializeComplexMetrics,
+        reportParseExceptions,
+        row,
+        numEntries,
+        key,
+        in,
+        rowSupplier,
+        skipMaxRowsInMemoryCheck
+    );
     updateMaxIngestedTime(row.getTimestamp());
     return rv;
   }
 
   @VisibleForTesting
-  TimeAndDims toTimeAndDims(InputRow row) throws IndexSizeExceededException
+  TimeAndDims toTimeAndDims(InputRow row)
   {
     row = formatRow(row);
     if (row.getTimestampFromEpoch() < minTimestamp) {
-      throw new IAE("Cannot add row[%s] because it is below the minTimestamp[%s]", row, new DateTime(minTimestamp));
+      throw new IAE("Cannot add row[%s] because it is below the minTimestamp[%s]", row, DateTimes.utc(minTimestamp));
     }
 
     final List<String> rowDimensions = row.getDimensions();
 
-    int[][] dims;
-    List<int[]> overflow = null;
+    Object[] dims;
+    List<Object> overflow = null;
     synchronized (dimensionDescs) {
-      dims = new int[dimensionDescs.size()][];
+      dims = new Object[dimensionDescs.size()];
       for (String dimension : rowDimensions) {
-        List<String> dimensionValues = row.getDimension(dimension);
-
+        boolean wasNewDim = false;
         ColumnCapabilitiesImpl capabilities;
         DimensionDesc desc = dimensionDescs.get(dimension);
         if (desc != null) {
           capabilities = desc.getCapabilities();
         } else {
+          wasNewDim = true;
           capabilities = columnCapabilities.get(dimension);
           if (capabilities == null) {
             capabilities = new ColumnCapabilitiesImpl();
+            // For schemaless type discovery, assume everything is a String for now, can change later.
             capabilities.setType(ValueType.STRING);
+            capabilities.setDictionaryEncoded(true);
+            capabilities.setHasBitmapIndexes(true);
             columnCapabilities.put(dimension, capabilities);
           }
+          DimensionHandler handler = DimensionHandlerUtils.getHandlerFromCapabilities(dimension, capabilities, null);
+          desc = addNewDimension(dimension, capabilities, handler);
         }
+        DimensionHandler handler = desc.getHandler();
+        DimensionIndexer indexer = desc.getIndexer();
+        Object dimsKey = indexer.processRowValsToUnsortedEncodedKeyComponent(row.getRaw(dimension));
 
         // Set column capabilities as data is coming in
-        if (!capabilities.hasMultipleValues() && dimensionValues.size() > 1) {
+        if (!capabilities.hasMultipleValues() && dimsKey != null && handler.getLengthOfEncodedKeyComponent(dimsKey) > 1) {
           capabilities.setHasMultipleValues(true);
         }
 
-        if (desc == null) {
-          desc = addNewDimension(dimension, capabilities);
-
+        if (wasNewDim) {
           if (overflow == null) {
             overflow = Lists.newArrayList();
           }
-          overflow.add(getDimVals(desc.getValues(), dimensionValues));
+          overflow.add(dimsKey);
         } else if (desc.getIndex() > dims.length || dims[desc.getIndex()] != null) {
           /*
            * index > dims.length requires that we saw this dimension and added it to the dimensionOrder map,
@@ -475,14 +576,14 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
            */
           throw new ISE("Dimension[%s] occurred more than once in InputRow", dimension);
         } else {
-          dims[desc.getIndex()] = getDimVals(desc.getValues(), dimensionValues);
+          dims[desc.getIndex()] = dimsKey;
         }
       }
     }
 
     if (overflow != null) {
       // Merge overflow and non-overflow
-      int[][] newDims = new int[dims.length + overflow.size()][];
+      Object[] newDims = new Object[dims.length + overflow.size()];
       System.arraycopy(dims, 0, newDims, 0, dims.length);
       for (int i = 0; i < overflow.size(); ++i) {
         newDims[dims.length + i] = overflow.get(i);
@@ -490,8 +591,11 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
       dims = newDims;
     }
 
-    long truncated = gran.truncate(row.getTimestampFromEpoch());
-    return new TimeAndDims(Math.max(truncated, minTimestamp), dims);
+    long truncated = 0;
+    if (row.getTimestamp() != null) {
+      truncated = gran.bucketStart(row.getTimestamp()).getMillis();
+    }
+    return new TimeAndDims(Math.max(truncated, minTimestamp), dims, dimensionDescsList);
   }
 
   private synchronized void updateMaxIngestedTime(DateTime eventTime)
@@ -513,36 +617,12 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
 
   private long getMinTimeMillis()
   {
-    return getFacts().firstKey().getTimestamp();
+    return getFacts().getMinTimeMillis();
   }
 
   private long getMaxTimeMillis()
   {
-    return getFacts().lastKey().getTimestamp();
-  }
-
-  private int[] getDimVals(final DimDim dimLookup, final List<String> dimValues)
-  {
-    if (dimValues.size() == 0) {
-      // NULL VALUE
-      dimLookup.add(null);
-      return null;
-    }
-
-    if (dimValues.size() == 1) {
-      return new int[]{dimLookup.add(dimValues.get(0))};
-    }
-
-    String[] dimArray = dimValues.toArray(new String[dimValues.size()]);
-    Arrays.sort(dimArray);
-
-    final int[] retVal = new int[dimArray.length];
-
-    for (int i = 0; i < dimArray.length; i++) {
-      retVal[i] = dimLookup.add(dimArray[i]);
-    }
-
-    return retVal;
+    return getFacts().getMaxTimeMillis();
   }
 
   public AggregatorType[] getAggs()
@@ -576,31 +656,58 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
     }
   }
 
+  @Nullable
   public String getMetricType(String metric)
   {
     final MetricDesc metricDesc = metricDescs.get(metric);
     return metricDesc != null ? metricDesc.getType() : null;
   }
 
+  public ColumnValueSelector<?> makeMetricColumnValueSelector(String metric, TimeAndDimsHolder currEntry)
+  {
+    MetricDesc metricDesc = metricDescs.get(metric);
+    if (metricDesc == null) {
+      return NilColumnValueSelector.instance();
+    }
+    int metricIndex = metricDesc.getIndex();
+    switch (metricDesc.getCapabilities().getType()) {
+      case COMPLEX:
+        return new ObjectMetricColumnSelector(metricDesc, currEntry, metricIndex);
+      case LONG:
+        return new LongMetricColumnSelector(currEntry, metricIndex);
+      case FLOAT:
+        return new FloatMetricColumnSelector(currEntry, metricIndex);
+      case DOUBLE:
+        return new DoubleMetricColumnSelector(currEntry, metricIndex);
+      case STRING:
+        throw new IllegalStateException("String is not a metric column type");
+      default:
+        throw new ISE("Unknown metric value type: %s", metricDesc.getCapabilities().getType());
+    }
+  }
+
   public Interval getInterval()
   {
-    return new Interval(minTimestamp, isEmpty() ? minTimestamp : gran.next(getMaxTimeMillis()));
+    DateTime min = DateTimes.utc(minTimestamp);
+    return new Interval(min, isEmpty() ? min : gran.increment(DateTimes.utc(getMaxTimeMillis())));
   }
 
+  @Nullable
   public DateTime getMinTime()
   {
-    return isEmpty() ? null : new DateTime(getMinTimeMillis());
+    return isEmpty() ? null : DateTimes.utc(getMinTimeMillis());
   }
 
+  @Nullable
   public DateTime getMaxTime()
   {
-    return isEmpty() ? null : new DateTime(getMaxTimeMillis());
+    return isEmpty() ? null : DateTimes.utc(getMaxTimeMillis());
   }
 
-  public DimDim getDimensionValues(String dimension)
+  public Integer getDimensionIndex(String dimension)
   {
     DimensionDesc dimSpec = getDimension(dimension);
-    return dimSpec == null ? null : dimSpec.getValues();
+    return dimSpec == null ? null : dimSpec.getIndex();
   }
 
   public List<String> getDimensionOrder()
@@ -610,12 +717,21 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
     }
   }
 
-  /*
+  private ColumnCapabilitiesImpl makeCapabilitesFromValueType(ValueType type)
+  {
+    ColumnCapabilitiesImpl capabilities = new ColumnCapabilitiesImpl();
+    capabilities.setDictionaryEncoded(type == ValueType.STRING);
+    capabilities.setHasBitmapIndexes(type == ValueType.STRING);
+    capabilities.setType(type);
+    return capabilities;
+  }
+
+  /**
    * Currently called to initialize IncrementalIndex dimension order during index creation
    * Index dimension ordering could be changed to initialize from DimensionsSpec after resolution of
    * https://github.com/druid-io/druid/issues/2011
    */
-  public void loadDimensionIterable(Iterable<String> oldDimensionOrder)
+  public void loadDimensionIterable(Iterable<String> oldDimensionOrder, Map<String, ColumnCapabilitiesImpl> oldColumnCapabilities)
   {
     synchronized (dimensionDescs) {
       if (!dimensionDescs.isEmpty()) {
@@ -623,25 +739,21 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
       }
       for (String dim : oldDimensionOrder) {
         if (dimensionDescs.get(dim) == null) {
-          ColumnCapabilitiesImpl capabilities = new ColumnCapabilitiesImpl();
-          capabilities.setType(ValueType.STRING);
+          ColumnCapabilitiesImpl capabilities = oldColumnCapabilities.get(dim);
           columnCapabilities.put(dim, capabilities);
-          addNewDimension(dim, capabilities);
+          DimensionHandler handler = DimensionHandlerUtils.getHandlerFromCapabilities(dim, capabilities, null);
+          addNewDimension(dim, capabilities, handler);
         }
       }
     }
   }
 
   @GuardedBy("dimensionDescs")
-  private DimensionDesc addNewDimension(String dim, ColumnCapabilitiesImpl capabilities)
+  private DimensionDesc addNewDimension(String dim, ColumnCapabilitiesImpl capabilities, DimensionHandler handler)
   {
-    DimensionDesc desc = new DimensionDesc(dimensionDescs.size(), dim, newDimDim(dim), capabilities);
-    if (dimValues.size() != desc.getIndex()) {
-      throw new ISE("dimensionDescs and dimValues for [%s] is out of sync!!", dim);
-    }
-
+    DimensionDesc desc = new DimensionDesc(dimensionDescs.size(), dim, capabilities, handler);
     dimensionDescs.put(dim, desc);
-    dimValues.add(desc.getValues());
+    dimensionDescsList.add(desc);
     return desc;
   }
 
@@ -650,25 +762,9 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
     return ImmutableList.copyOf(metricDescs.keySet());
   }
 
-  public List<MetricDesc> getMetrics()
-  {
-    return ImmutableList.copyOf(metricDescs.values());
-  }
-
-  public Integer getMetricIndex(String metricName)
-  {
-    MetricDesc metSpec = metricDescs.get(metricName);
-    return metSpec == null ? null : metSpec.getIndex();
-  }
-
   public ColumnCapabilities getCapabilities(String column)
   {
     return columnCapabilities.get(column);
-  }
-
-  public ConcurrentNavigableMap<TimeAndDims, Integer> getSubMap(TimeAndDims start, TimeAndDims end)
-  {
-    return getFacts().subMap(start, end);
   }
 
   public Metadata getMetadata()
@@ -685,6 +781,15 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
     return combiningAggregators;
   }
 
+  public Map<String, DimensionHandler> getDimensionHandlers()
+  {
+    Map<String, DimensionHandler> handlers = Maps.newLinkedHashMap();
+    for (DimensionDesc desc : dimensionDescsList) {
+      handlers.put(desc.getName(), desc.getHandler());
+    }
+    return handlers;
+  }
+
   @Override
   public Iterator<Row> iterator()
   {
@@ -699,55 +804,44 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
       public Iterator<Row> iterator()
       {
         final List<DimensionDesc> dimensions = getDimensions();
-        final ConcurrentNavigableMap<TimeAndDims, Integer> facts = descending ? getFacts().descendingMap() : getFacts();
+
         return Iterators.transform(
-            facts.entrySet().iterator(),
-            new Function<Map.Entry<TimeAndDims, Integer>, Row>()
-            {
-              @Override
-              public Row apply(final Map.Entry<TimeAndDims, Integer> input)
-              {
-                final TimeAndDims timeAndDims = input.getKey();
-                final int rowOffset = input.getValue();
+            getFacts().iterator(descending),
+            timeAndDims -> {
+              final int rowOffset = timeAndDims.getRowIndex();
 
-                int[][] theDims = timeAndDims.getDims();
+              Object[] theDims = timeAndDims.getDims();
 
-                Map<String, Object> theVals = Maps.newLinkedHashMap();
-                for (int i = 0; i < theDims.length; ++i) {
-                  int[] dim = theDims[i];
-                  DimensionDesc dimensionDesc = dimensions.get(i);
-                  if (dimensionDesc == null) {
-                    continue;
-                  }
-                  String dimensionName = dimensionDesc.getName();
-                  if (dim == null || dim.length == 0) {
-                    theVals.put(dimensionName, null);
-                    continue;
-                  }
-                  if (dim.length == 1) {
-                    theVals.put(dimensionName, Strings.nullToEmpty(dimensionDesc.getValues().getValue(dim[0])));
-                  } else {
-                    String[] dimStringValue = new String[dim.length];
-                    for (int j = 0; j < dimStringValue.length; j++) {
-                      dimStringValue[j] = Strings.nullToEmpty(dimensionDesc.getValues().getValue(dim[j]));
-                    }
-                    theVals.put(dimensionName, dimStringValue);
-                  }
+              Map<String, Object> theVals = Maps.newLinkedHashMap();
+              for (int i = 0; i < theDims.length; ++i) {
+                Object dim = theDims[i];
+                DimensionDesc dimensionDesc = dimensions.get(i);
+                if (dimensionDesc == null) {
+                  continue;
                 }
-
-                AggregatorType[] aggs = getAggsForRow(rowOffset);
-                for (int i = 0; i < aggs.length; ++i) {
-                  theVals.put(metrics[i].getName(), getAggVal(aggs[i], rowOffset, i));
+                String dimensionName = dimensionDesc.getName();
+                DimensionHandler handler = dimensionDesc.getHandler();
+                if (dim == null || handler.getLengthOfEncodedKeyComponent(dim) == 0) {
+                  theVals.put(dimensionName, null);
+                  continue;
                 }
-
-                if (postAggs != null) {
-                  for (PostAggregator postAgg : postAggs) {
-                    theVals.put(postAgg.getName(), postAgg.compute(theVals));
-                  }
-                }
-
-                return new MapBasedRow(timeAndDims.getTimestamp(), theVals);
+                final DimensionIndexer indexer = dimensionDesc.getIndexer();
+                Object rowVals = indexer.convertUnsortedEncodedKeyComponentToActualArrayOrList(dim, DimensionIndexer.LIST);
+                theVals.put(dimensionName, rowVals);
               }
+
+              AggregatorType[] aggs = getAggsForRow(rowOffset);
+              for (int i = 0; i < aggs.length; ++i) {
+                theVals.put(metrics[i].getName(), getAggVal(aggs[i], rowOffset, i));
+              }
+
+              if (postAggs != null) {
+                for (PostAggregator postAgg : postAggs) {
+                  theVals.put(postAgg.getName(), postAgg.compute(theVals));
+                }
+              }
+
+              return new MapBasedRow(timeAndDims.getTimestamp(), theVals);
             }
         );
       }
@@ -763,15 +857,17 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
   {
     private final int index;
     private final String name;
-    private final DimDim values;
     private final ColumnCapabilitiesImpl capabilities;
+    private final DimensionHandler handler;
+    private final DimensionIndexer indexer;
 
-    public DimensionDesc(int index, String name, DimDim values, ColumnCapabilitiesImpl capabilities)
+    public DimensionDesc(int index, String name, ColumnCapabilitiesImpl capabilities, DimensionHandler handler)
     {
       this.index = index;
       this.name = name;
-      this.values = values;
       this.capabilities = capabilities;
+      this.handler = handler;
+      this.indexer = handler.makeIndexer();
     }
 
     public int getIndex()
@@ -784,14 +880,19 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
       return name;
     }
 
-    public DimDim getValues()
-    {
-      return values;
-    }
-
     public ColumnCapabilitiesImpl getCapabilities()
     {
       return capabilities;
+    }
+
+    public DimensionHandler getHandler()
+    {
+      return handler;
+    }
+
+    public DimensionIndexer getIndexer()
+    {
+      return indexer;
     }
   }
 
@@ -806,14 +907,21 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
     {
       this.index = index;
       this.name = factory.getName();
-      this.type = factory.getTypeName();
+
+      String typeInfo = factory.getTypeName();
       this.capabilities = new ColumnCapabilitiesImpl();
-      if (type.equalsIgnoreCase("float")) {
+      if (typeInfo.equalsIgnoreCase("float")) {
         capabilities.setType(ValueType.FLOAT);
-      } else if (type.equalsIgnoreCase("long")) {
+        this.type = typeInfo;
+      } else if (typeInfo.equalsIgnoreCase("long")) {
         capabilities.setType(ValueType.LONG);
+        this.type = typeInfo;
+      } else if (typeInfo.equalsIgnoreCase("double")) {
+        capabilities.setType(ValueType.DOUBLE);
+        this.type = typeInfo;
       } else {
         capabilities.setType(ValueType.COMPLEX);
+        this.type = ComplexMetrics.getSerdeForType(typeInfo).getTypeName();
       }
     }
 
@@ -838,189 +946,145 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
     }
   }
 
-  static interface DimDim
+  public static final class TimeAndDims
   {
-    public int getId(String value);
+    public static final int EMPTY_ROW_INDEX = -1;
 
-    public String getValue(int id);
-
-    public boolean contains(String value);
-
-    public int size();
-
-    public String getMinValue();
-
-    public String getMaxValue();
-
-    public int add(String value);
-
-    public SortedDimLookup sort();
-  }
-
-  static interface SortedDimLookup
-  {
-    public int size();
-
-    public int idToIndex(int id);
-
-    public int indexToId(int index);
-
-    public String getValue(int index);
-  }
-
-  /**
-   * implementation which converts null strings to empty strings and vice versa.
-   */
-  static class NullValueConverterDimDim implements DimDim
-  {
-    private final DimDim delegate;
-
-    NullValueConverterDimDim(DimDim delegate)
-    {
-      this.delegate = delegate;
-    }
-
-    @Override
-    public int getId(String value)
-    {
-      return delegate.getId(Strings.nullToEmpty(value));
-    }
-
-    @Override
-    public String getValue(int id)
-    {
-      return Strings.emptyToNull(delegate.getValue(id));
-    }
-
-    @Override
-    public boolean contains(String value)
-    {
-      return delegate.contains(Strings.nullToEmpty(value));
-    }
-
-    @Override
-    public int size()
-    {
-      return delegate.size();
-    }
-
-    @Override
-    public String getMinValue()
-    {
-      return Strings.nullToEmpty(delegate.getMinValue());
-    }
-
-    @Override
-    public String getMaxValue()
-    {
-      return Strings.nullToEmpty(delegate.getMaxValue());
-    }
-
-    @Override
-    public int add(String value)
-    {
-      return delegate.add(Strings.nullToEmpty(value));
-    }
-
-    @Override
-    public SortedDimLookup sort()
-    {
-      return new NullValueConverterDimLookup(delegate.sort());
-    }
-  }
-
-  private static class NullValueConverterDimLookup implements SortedDimLookup
-  {
-    private final SortedDimLookup delegate;
-
-    public NullValueConverterDimLookup(SortedDimLookup delegate)
-    {
-      this.delegate = delegate;
-    }
-
-    @Override
-    public int size()
-    {
-      return delegate.size();
-    }
-
-    @Override
-    public int indexToId(int index)
-    {
-      return delegate.indexToId(index);
-    }
-
-    @Override
-    public int idToIndex(int id)
-    {
-      return delegate.idToIndex(id);
-    }
-
-    @Override
-    public String getValue(int index)
-    {
-      return Strings.emptyToNull(delegate.getValue(index));
-    }
-  }
-
-  static final class TimeAndDims
-  {
     private final long timestamp;
-    private final int[][] dims;
+    private final Object[] dims;
+    private final List<DimensionDesc> dimensionDescsList;
+
+    /**
+     * rowIndex is not checked in {@link #equals} and {@link #hashCode} on purpose. TimeAndDims acts as a Map key
+     * and "entry" object (rowIndex is the "value") at the same time. This is done to reduce object indirection and
+     * improve locality, and avoid boxing of rowIndex as Integer, when stored in JDK collection:
+     * {@link RollupFactsHolder} needs concurrent collections, that are not present in fastutil.
+     */
+    private int rowIndex;
 
     TimeAndDims(
         long timestamp,
-        int[][] dims
+        Object[] dims,
+        List<DimensionDesc> dimensionDescsList
+    )
+    {
+      this(timestamp, dims, dimensionDescsList, EMPTY_ROW_INDEX);
+    }
+
+    TimeAndDims(
+        long timestamp,
+        Object[] dims,
+        List<DimensionDesc> dimensionDescsList,
+        int rowIndex
     )
     {
       this.timestamp = timestamp;
       this.dims = dims;
+      this.dimensionDescsList = dimensionDescsList;
+      this.rowIndex = rowIndex;
     }
 
-    long getTimestamp()
+    public long getTimestamp()
     {
       return timestamp;
     }
 
-    int[][] getDims()
+    public Object[] getDims()
     {
       return dims;
+    }
+
+    public int getRowIndex()
+    {
+      return rowIndex;
+    }
+
+    private void setRowIndex(int rowIndex)
+    {
+      this.rowIndex = rowIndex;
     }
 
     @Override
     public String toString()
     {
       return "TimeAndDims{" +
-             "timestamp=" + new DateTime(timestamp) +
+             "timestamp=" + DateTimes.utc(timestamp) +
              ", dims=" + Lists.transform(
-          Arrays.asList(dims), new Function<int[], Object>()
+          Arrays.asList(dims), new Function<Object, Object>()
           {
             @Override
-            public Object apply(@Nullable int[] input)
+            public Object apply(@Nullable Object input)
             {
-              if (input == null || input.length == 0) {
-                return Arrays.asList("null");
+              if (input == null || Array.getLength(input) == 0) {
+                return Collections.singletonList("null");
               }
-              return Arrays.asList(input);
+              return Collections.singletonList(input);
             }
           }
       ) + '}';
     }
+
+    @Override
+    public boolean equals(Object o)
+    {
+      if (this == o) {
+        return true;
+      }
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
+
+      TimeAndDims that = (TimeAndDims) o;
+
+      if (timestamp != that.timestamp) {
+        return false;
+      }
+      if (dims.length != that.dims.length) {
+        return false;
+      }
+      for (int i = 0; i < dims.length; i++) {
+        final DimensionIndexer indexer = dimensionDescsList.get(i).getIndexer();
+        if (!indexer.checkUnsortedEncodedKeyComponentsEqual(dims[i], that.dims[i])) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    @Override
+    public int hashCode()
+    {
+      int hash = (int) timestamp;
+      for (int i = 0; i < dims.length; i++) {
+        final DimensionIndexer indexer = dimensionDescsList.get(i).getIndexer();
+        hash = 31 * hash + indexer.getUnsortedEncodedKeyComponentHashCode(dims[i]);
+      }
+      return hash;
+    }
+  }
+
+  protected ColumnSelectorFactory makeColumnSelectorFactory(
+      final AggregatorFactory agg,
+      final Supplier<InputRow> in,
+      final boolean deserializeComplexMetrics
+  )
+  {
+    return makeColumnSelectorFactory(virtualColumns, agg, in, deserializeComplexMetrics);
   }
 
   protected final Comparator<TimeAndDims> dimsComparator()
   {
-    return new TimeAndDimsComp(dimValues);
+    return new TimeAndDimsComp(dimensionDescsList);
   }
 
   @VisibleForTesting
   static final class TimeAndDimsComp implements Comparator<TimeAndDims>
   {
-    private final List<DimDim> dimValues;
+    private List<DimensionDesc> dimensionDescs;
 
-    public TimeAndDimsComp(List<DimDim> dimValues)
+    public TimeAndDimsComp(List<DimensionDesc> dimDescs)
     {
-      this.dimValues = dimValues;
+      this.dimensionDescs = dimDescs;
     }
 
     @Override
@@ -1031,8 +1095,8 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
 
       int index = 0;
       while (retVal == 0 && index < numComparisons) {
-        final int[] lhsIdxs = lhs.dims[index];
-        final int[] rhsIdxs = rhs.dims[index];
+        final Object lhsIdxs = lhs.dims[index];
+        final Object rhsIdxs = rhs.dims[index];
 
         if (lhsIdxs == null) {
           if (rhsIdxs == null) {
@@ -1046,30 +1110,361 @@ public abstract class IncrementalIndex<AggregatorType> implements Iterable<Row>,
           return 1;
         }
 
-        retVal = Ints.compare(lhsIdxs.length, rhsIdxs.length);
-
-        int valsIndex = 0;
-        while (retVal == 0 && valsIndex < lhsIdxs.length) {
-          if (lhsIdxs[valsIndex] != rhsIdxs[valsIndex]) {
-            final DimDim dimLookup = dimValues.get(index);
-            final String lhsVal = dimLookup.getValue(lhsIdxs[valsIndex]);
-            final String rhsVal = dimLookup.getValue(rhsIdxs[valsIndex]);
-            if (lhsVal != null && rhsVal != null) {
-              retVal = lhsVal.compareTo(rhsVal);
-            } else if (lhsVal == null ^ rhsVal == null) {
-              retVal = lhsVal == null ? -1 : 1;
-            }
-          }
-          ++valsIndex;
-        }
+        final DimensionIndexer indexer = dimensionDescs.get(index).getIndexer();
+        retVal = indexer.compareUnsortedEncodedKeyComponents(lhsIdxs, rhsIdxs);
         ++index;
       }
 
       if (retVal == 0) {
-        return Ints.compare(lhs.dims.length, rhs.dims.length);
+        int lengthDiff = Ints.compare(lhs.dims.length, rhs.dims.length);
+        if (lengthDiff == 0) {
+          return 0;
+        }
+        Object[] largerDims = lengthDiff > 0 ? lhs.dims : rhs.dims;
+        return allNull(largerDims, numComparisons) ? 0 : lengthDiff;
       }
 
       return retVal;
+    }
+  }
+
+  private static boolean allNull(Object[] dims, int startPosition)
+  {
+    for (int i = startPosition; i < dims.length; i++) {
+      if (dims[i] != null) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  interface FactsHolder
+  {
+    /**
+     * @return the previous rowIndex associated with the specified key, or
+     * {@code TimeAndDims#EMPTY_ROW_INDEX} if there was no mapping for the key.
+     */
+    int getPriorIndex(TimeAndDims key);
+
+    long getMinTimeMillis();
+
+    long getMaxTimeMillis();
+
+    Iterator<TimeAndDims> iterator(boolean descending);
+
+    Iterable<TimeAndDims> timeRangeIterable(boolean descending, long timeStart, long timeEnd);
+
+    Iterable<TimeAndDims> keySet();
+
+    /**
+     * @return the previous rowIndex associated with the specified key, or
+     * {@code TimeAndDims#EMPTY_ROW_INDEX} if there was no mapping for the key.
+     */
+    int putIfAbsent(TimeAndDims key, int rowIndex);
+
+    void clear();
+  }
+
+  static class RollupFactsHolder implements FactsHolder
+  {
+    private final boolean sortFacts;
+    // Can't use Set because we need to be able to get from collection
+    private final ConcurrentMap<TimeAndDims, TimeAndDims> facts;
+    private final List<DimensionDesc> dimensionDescsList;
+
+    public RollupFactsHolder(boolean sortFacts, Comparator<TimeAndDims> timeAndDimsComparator, List<DimensionDesc> dimensionDescsList)
+    {
+      this.sortFacts = sortFacts;
+      if (sortFacts) {
+        this.facts = new ConcurrentSkipListMap<>(timeAndDimsComparator);
+      } else {
+        this.facts = new ConcurrentHashMap<>();
+      }
+      this.dimensionDescsList = dimensionDescsList;
+    }
+
+    @Override
+    public int getPriorIndex(TimeAndDims key)
+    {
+      TimeAndDims timeAndDims = facts.get(key);
+      return timeAndDims == null ? TimeAndDims.EMPTY_ROW_INDEX : timeAndDims.rowIndex;
+    }
+
+    @Override
+    public long getMinTimeMillis()
+    {
+      if (sortFacts) {
+        return ((ConcurrentNavigableMap<TimeAndDims, TimeAndDims>) facts).firstKey().getTimestamp();
+      } else {
+        throw new UnsupportedOperationException("can't get minTime from unsorted facts data.");
+      }
+    }
+
+    @Override
+    public long getMaxTimeMillis()
+    {
+      if (sortFacts) {
+        return ((ConcurrentNavigableMap<TimeAndDims, TimeAndDims>) facts).lastKey().getTimestamp();
+      } else {
+        throw new UnsupportedOperationException("can't get maxTime from unsorted facts data.");
+      }
+    }
+
+    @Override
+    public Iterator<TimeAndDims> iterator(boolean descending)
+    {
+      if (descending && sortFacts) {
+        return ((ConcurrentNavigableMap<TimeAndDims, TimeAndDims>) facts).descendingMap().keySet().iterator();
+      }
+      return keySet().iterator();
+    }
+
+    @Override
+    public Iterable<TimeAndDims> timeRangeIterable(boolean descending, long timeStart, long timeEnd)
+    {
+      if (!sortFacts) {
+        throw new UnsupportedOperationException("can't get timeRange from unsorted facts data.");
+      }
+      TimeAndDims start = new TimeAndDims(timeStart, new Object[]{}, dimensionDescsList);
+      TimeAndDims end = new TimeAndDims(timeEnd, new Object[]{}, dimensionDescsList);
+      ConcurrentNavigableMap<TimeAndDims, TimeAndDims> subMap =
+          ((ConcurrentNavigableMap<TimeAndDims, TimeAndDims>) facts).subMap(start, end);
+      final Map<TimeAndDims, TimeAndDims> rangeMap = descending ? subMap.descendingMap() : subMap;
+      return rangeMap.keySet();
+    }
+
+    @Override
+    public Iterable<TimeAndDims> keySet()
+    {
+      return facts.keySet();
+    }
+
+    @Override
+    public int putIfAbsent(TimeAndDims key, int rowIndex)
+    {
+      // setRowIndex() must be called before facts.putIfAbsent() for visibility of rowIndex from concurrent readers.
+      key.setRowIndex(rowIndex);
+      TimeAndDims prev = facts.putIfAbsent(key, key);
+      return prev == null ? TimeAndDims.EMPTY_ROW_INDEX : prev.rowIndex;
+    }
+
+    @Override
+    public void clear()
+    {
+      facts.clear();
+    }
+  }
+
+  static class PlainFactsHolder implements FactsHolder
+  {
+    private final boolean sortFacts;
+    private final ConcurrentMap<Long, Deque<TimeAndDims>> facts;
+
+    public PlainFactsHolder(boolean sortFacts)
+    {
+      this.sortFacts = sortFacts;
+      if (sortFacts) {
+        this.facts = new ConcurrentSkipListMap<>();
+      } else {
+        this.facts = new ConcurrentHashMap<>();
+      }
+    }
+
+    @Override
+    public int getPriorIndex(TimeAndDims key)
+    {
+      // always return EMPTY_ROW_INDEX to indicate that no prior key cause we always add new row
+      return TimeAndDims.EMPTY_ROW_INDEX;
+    }
+
+    @Override
+    public long getMinTimeMillis()
+    {
+      if (sortFacts) {
+        return ((ConcurrentNavigableMap<Long, Deque<TimeAndDims>>) facts).firstKey();
+      } else {
+        throw new UnsupportedOperationException("can't get minTime from unsorted facts data.");
+      }
+    }
+
+    @Override
+    public long getMaxTimeMillis()
+    {
+      if (sortFacts) {
+        return ((ConcurrentNavigableMap<Long, Deque<TimeAndDims>>) facts).lastKey();
+      } else {
+        throw new UnsupportedOperationException("can't get maxTime from unsorted facts data.");
+      }
+    }
+
+    @Override
+    public Iterator<TimeAndDims> iterator(boolean descending)
+    {
+      if (descending && sortFacts) {
+        return concat(((ConcurrentNavigableMap<Long, Deque<TimeAndDims>>) facts)
+                .descendingMap().values(), true).iterator();
+      }
+      return concat(facts.values(), false).iterator();
+    }
+
+    @Override
+    public Iterable<TimeAndDims> timeRangeIterable(boolean descending, long timeStart, long timeEnd)
+    {
+      ConcurrentNavigableMap<Long, Deque<TimeAndDims>> subMap =
+          ((ConcurrentNavigableMap<Long, Deque<TimeAndDims>>) facts).subMap(timeStart, timeEnd);
+      final Map<Long, Deque<TimeAndDims>> rangeMap = descending ? subMap.descendingMap() : subMap;
+      return concat(rangeMap.values(), descending);
+    }
+
+    private Iterable<TimeAndDims> concat(
+        final Iterable<Deque<TimeAndDims>> iterable,
+        final boolean descending
+    )
+    {
+      return () -> Iterators.concat(
+          Iterators.transform(
+              iterable.iterator(),
+              input -> descending ? input.descendingIterator() : input.iterator()
+          )
+      );
+    }
+
+    @Override
+    public Iterable<TimeAndDims> keySet()
+    {
+      return concat(facts.values(), false);
+    }
+
+    @Override
+    public int putIfAbsent(TimeAndDims key, int rowIndex)
+    {
+      Long time = key.getTimestamp();
+      Deque<TimeAndDims> rows = facts.get(time);
+      if (rows == null) {
+        facts.putIfAbsent(time, new ConcurrentLinkedDeque<>());
+        // in race condition, rows may be put by other thread, so always get latest status from facts
+        rows = facts.get(time);
+      }
+      // setRowIndex() must be called before rows.add() for visibility of rowIndex from concurrent readers.
+      key.setRowIndex(rowIndex);
+      rows.add(key);
+      // always return EMPTY_ROW_INDEX to indicate that we always add new row
+      return TimeAndDims.EMPTY_ROW_INDEX;
+    }
+
+    @Override
+    public void clear()
+    {
+      facts.clear();
+    }
+  }
+
+  private class LongMetricColumnSelector implements LongColumnSelector
+  {
+    private final TimeAndDimsHolder currEntry;
+    private final int metricIndex;
+
+    public LongMetricColumnSelector(TimeAndDimsHolder currEntry, int metricIndex)
+    {
+      this.currEntry = currEntry;
+      this.metricIndex = metricIndex;
+    }
+
+    @Override
+    public long getLong()
+    {
+      return getMetricLongValue(currEntry.getValue(), metricIndex);
+    }
+
+    @Override
+    public void inspectRuntimeShape(RuntimeShapeInspector inspector)
+    {
+      inspector.visit("index", IncrementalIndex.this);
+    }
+  }
+
+  private class ObjectMetricColumnSelector implements ObjectColumnSelector
+  {
+    private final TimeAndDimsHolder currEntry;
+    private final int metricIndex;
+    private Class classOfObject;
+
+    public ObjectMetricColumnSelector(
+        MetricDesc metricDesc,
+        TimeAndDimsHolder currEntry,
+        int metricIndex
+    )
+    {
+      this.currEntry = currEntry;
+      this.metricIndex = metricIndex;
+      classOfObject = ComplexMetrics.getSerdeForType(metricDesc.getType()).getObjectStrategy().getClazz();
+    }
+
+    @Nullable
+    @Override
+    public Object getObject()
+    {
+      return getMetricObjectValue(currEntry.getValue(), metricIndex);
+    }
+
+    @Override
+    public Class classOfObject()
+    {
+      return classOfObject;
+    }
+
+    @Override
+    public void inspectRuntimeShape(RuntimeShapeInspector inspector)
+    {
+      inspector.visit("index", IncrementalIndex.this);
+    }
+  }
+
+  private class FloatMetricColumnSelector implements FloatColumnSelector
+  {
+    private final TimeAndDimsHolder currEntry;
+    private final int metricIndex;
+
+    public FloatMetricColumnSelector(TimeAndDimsHolder currEntry, int metricIndex)
+    {
+      this.currEntry = currEntry;
+      this.metricIndex = metricIndex;
+    }
+
+    @Override
+    public float getFloat()
+    {
+      return getMetricFloatValue(currEntry.getValue(), metricIndex);
+    }
+
+    @Override
+    public void inspectRuntimeShape(RuntimeShapeInspector inspector)
+    {
+      inspector.visit("index", IncrementalIndex.this);
+    }
+  }
+
+  private class DoubleMetricColumnSelector implements DoubleColumnSelector
+  {
+    private final TimeAndDimsHolder currEntry;
+    private final int metricIndex;
+
+    public DoubleMetricColumnSelector(TimeAndDimsHolder currEntry, int metricIndex)
+    {
+      this.currEntry = currEntry;
+      this.metricIndex = metricIndex;
+    }
+
+    @Override
+    public double getDouble()
+    {
+      return getMetricDoubleValue(currEntry.getValue(), metricIndex);
+    }
+
+    @Override
+    public void inspectRuntimeShape(RuntimeShapeInspector inspector)
+    {
+      inspector.visit("index", IncrementalIndex.this);
     }
   }
 }

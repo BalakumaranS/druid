@@ -20,18 +20,21 @@
 package io.druid.realtime.firehose;
 
 import com.google.common.collect.Lists;
-import com.metamx.common.parsers.ParseException;
 import io.druid.data.input.Firehose;
 import io.druid.data.input.FirehoseFactory;
 import io.druid.data.input.InputRow;
 import io.druid.data.input.Row;
 import io.druid.data.input.impl.InputRowParser;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.parsers.ParseException;
 import io.druid.segment.realtime.firehose.CombiningFirehoseFactory;
 import io.druid.utils.Runnables;
 import org.joda.time.DateTime;
 import org.junit.Assert;
 import org.junit.Test;
 
+import javax.annotation.Nullable;
+import java.io.File;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Iterator;
@@ -51,12 +54,12 @@ public class CombiningFirehoseFactoryTest
             new ListFirehoseFactory(list2)
         )
     );
-    final Firehose firehose = combiningFactory.connect(null);
+    final Firehose firehose = combiningFactory.connect(null, null);
     for (int i = 1; i < 6; i++) {
       Assert.assertTrue(firehose.hasMore());
       final InputRow inputRow = firehose.nextRow();
       Assert.assertEquals(i, inputRow.getTimestampFromEpoch());
-      Assert.assertEquals(i, inputRow.getFloatMetric("test"), 0);
+      Assert.assertEquals(i, inputRow.getMetric("test").floatValue(), 0);
     }
     Assert.assertFalse(firehose.hasMore());
   }
@@ -80,7 +83,7 @@ public class CombiningFirehoseFactoryTest
       @Override
       public DateTime getTimestamp()
       {
-        return new DateTime(timestamp);
+        return DateTimes.utc(timestamp);
       }
 
       @Override
@@ -90,15 +93,9 @@ public class CombiningFirehoseFactoryTest
       }
 
       @Override
-      public float getFloatMetric(String metric)
+      public Number getMetric(String metric)
       {
         return metricValue;
-      }
-
-      @Override
-      public long getLongMetric(String metric)
-      {
-        return new Float(metricValue).longValue();
       }
 
       @Override
@@ -125,7 +122,7 @@ public class CombiningFirehoseFactoryTest
     }
 
     @Override
-    public Firehose connect(InputRowParser inputRowParser) throws IOException, ParseException
+    public Firehose connect(InputRowParser inputRowParser, File temporaryDirectory) throws IOException, ParseException
     {
       final Iterator<InputRow> iterator = rows.iterator();
       return new Firehose()
@@ -136,6 +133,7 @@ public class CombiningFirehoseFactoryTest
           return iterator.hasNext();
         }
 
+        @Nullable
         @Override
         public InputRow nextRow()
         {

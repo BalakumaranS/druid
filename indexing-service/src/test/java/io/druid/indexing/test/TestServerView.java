@@ -20,19 +20,38 @@
 package io.druid.indexing.test;
 
 import com.google.common.base.Predicate;
-import com.google.common.collect.Maps;
-import com.metamx.common.Pair;
+import io.druid.client.DruidServer;
+import io.druid.client.FilteredServerInventoryView;
 import io.druid.client.ServerView;
+import io.druid.java.util.common.Pair;
 import io.druid.server.coordination.DruidServerMetadata;
 import io.druid.timeline.DataSegment;
 
+import java.util.Collection;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
 
-public class TestServerView implements ServerView.SegmentCallback
+public class TestServerView implements FilteredServerInventoryView, ServerView.SegmentCallback
 {
-  final ConcurrentMap<ServerView.SegmentCallback, Pair<Predicate<DataSegment>, Executor>> callbacks = Maps.newConcurrentMap();
+  final ConcurrentMap<ServerView.SegmentCallback, Pair<Predicate<Pair<DruidServerMetadata, DataSegment>>, Executor>> callbacks = new ConcurrentHashMap<>();
+
+  @Override
+  public void registerSegmentCallback(
+      final Executor exec,
+      final ServerView.SegmentCallback callback,
+      final Predicate<Pair<DruidServerMetadata, DataSegment>> filter
+  )
+  {
+    callbacks.put(callback, Pair.of(filter, exec));
+  }
+
+  @Override
+  public void registerServerRemovedCallback(Executor exec, ServerView.ServerRemovedCallback callback)
+  {
+    // No-op
+  }
 
   @Override
   public ServerView.CallbackAction segmentAdded(
@@ -40,8 +59,8 @@ public class TestServerView implements ServerView.SegmentCallback
       final DataSegment segment
   )
   {
-    for (final Map.Entry<ServerView.SegmentCallback, Pair<Predicate<DataSegment>, Executor>> entry : callbacks.entrySet()) {
-      if (entry.getValue().lhs.apply(segment)) {
+    for (final Map.Entry<ServerView.SegmentCallback, Pair<Predicate<Pair<DruidServerMetadata, DataSegment>>, Executor>> entry : callbacks.entrySet()) {
+      if (entry.getValue().lhs.apply(Pair.of(server, segment))) {
         entry.getValue().rhs.execute(
             new Runnable()
             {
@@ -64,8 +83,8 @@ public class TestServerView implements ServerView.SegmentCallback
       final DataSegment segment
   )
   {
-    for (final Map.Entry<ServerView.SegmentCallback, Pair<Predicate<DataSegment>, Executor>> entry : callbacks.entrySet()) {
-      if (entry.getValue().lhs.apply(segment)) {
+    for (final Map.Entry<ServerView.SegmentCallback, Pair<Predicate<Pair<DruidServerMetadata, DataSegment>>, Executor>> entry : callbacks.entrySet()) {
+      if (entry.getValue().lhs.apply(Pair.of(server, segment))) {
         entry.getValue().rhs.execute(
             new Runnable()
             {
@@ -85,7 +104,7 @@ public class TestServerView implements ServerView.SegmentCallback
   @Override
   public ServerView.CallbackAction segmentViewInitialized()
   {
-    for (final Map.Entry<ServerView.SegmentCallback, Pair<Predicate<DataSegment>, Executor>> entry : callbacks.entrySet()) {
+    for (final Map.Entry<ServerView.SegmentCallback, Pair<Predicate<Pair<DruidServerMetadata, DataSegment>>, Executor>> entry : callbacks.entrySet()) {
       entry.getValue().rhs.execute(
           new Runnable()
           {
@@ -99,5 +118,29 @@ public class TestServerView implements ServerView.SegmentCallback
     }
 
     return ServerView.CallbackAction.CONTINUE;
+  }
+
+  @Override
+  public DruidServer getInventoryValue(String string)
+  {
+    return null;
+  }
+
+  @Override
+  public Collection<DruidServer> getInventory()
+  {
+    return null;
+  }
+
+  @Override
+  public boolean isStarted()
+  {
+    return true;
+  }
+
+  @Override
+  public boolean isSegmentLoadedByServer(String serverKey, DataSegment segment)
+  {
+    return false;
   }
 }

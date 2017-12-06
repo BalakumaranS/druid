@@ -21,7 +21,7 @@ package io.druid.tests.indexer;
 
 import com.google.common.base.Throwables;
 import com.google.inject.Inject;
-import com.metamx.common.logger.Logger;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.testing.IntegrationTestingConfig;
 import io.druid.testing.clients.ClientInfoResourceTestClient;
 import io.druid.testing.guice.DruidTestModuleFactory;
@@ -65,7 +65,7 @@ public class ITIndexerTest extends AbstractIndexerTest
       Assert.assertFalse("dimensions : " + dimensions, dimensions.contains("robot"));
     }
     catch (Exception e) {
-      e.printStackTrace();
+      LOG.error(e, "Error while testing");
       throw Throwables.propagate(e);
     }
     finally {

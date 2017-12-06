@@ -21,18 +21,23 @@ package io.druid.server.http;
 
 import com.google.common.collect.Maps;
 import com.google.inject.Inject;
-import com.metamx.common.MapUtils;
-import com.metamx.common.guava.Comparators;
-import io.druid.client.DruidDataSource;
+import io.druid.client.ImmutableDruidDataSource;
 import io.druid.client.InventoryView;
+import io.druid.java.util.common.Intervals;
+import io.druid.java.util.common.MapUtils;
+import io.druid.java.util.common.guava.Comparators;
+import io.druid.server.security.AuthConfig;
+import io.druid.server.security.AuthorizerMapper;
 import io.druid.timeline.DataSegment;
 import org.joda.time.Interval;
 
+import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.GET;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
+import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import java.util.Comparator;
@@ -45,35 +50,45 @@ import java.util.Set;
 public class IntervalsResource
 {
   private final InventoryView serverInventoryView;
+  private final AuthConfig authConfig;
+  private final AuthorizerMapper authorizerMapper;
 
   @Inject
   public IntervalsResource(
-      InventoryView serverInventoryView
+      InventoryView serverInventoryView,
+      AuthConfig authConfig,
+      AuthorizerMapper authorizerMapper
   )
   {
     this.serverInventoryView = serverInventoryView;
+    this.authConfig = authConfig;
+    this.authorizerMapper = authorizerMapper;
   }
 
   @GET
   @Produces(MediaType.APPLICATION_JSON)
-  public Response getIntervals()
+  public Response getIntervals(@Context final HttpServletRequest req)
   {
-      final Comparator<Interval> comparator = Comparators.inverse(Comparators.intervalsByStartThenEnd());
-      final Set<DruidDataSource> datasources = InventoryViewUtils.getDataSources(serverInventoryView);
+    final Comparator<Interval> comparator = Comparators.inverse(Comparators.intervalsByStartThenEnd());
+    final Set<ImmutableDruidDataSource> datasources = InventoryViewUtils.getSecuredDataSources(
+        req,
+        serverInventoryView,
+        authorizerMapper
+    );
 
-      final Map<Interval, Map<String, Map<String, Object>>> retVal = Maps.newTreeMap(comparator);
-      for (DruidDataSource dataSource : datasources) {
-        for (DataSegment dataSegment : dataSource.getSegments()) {
-          Map<String, Map<String, Object>> interval = retVal.get(dataSegment.getInterval());
-          if (interval == null) {
-            Map<String, Map<String, Object>> tmp = Maps.newHashMap();
-            retVal.put(dataSegment.getInterval(), tmp);
-          }
-          setProperties(retVal, dataSource, dataSegment);
+    final Map<Interval, Map<String, Map<String, Object>>> retVal = Maps.newTreeMap(comparator);
+    for (ImmutableDruidDataSource dataSource : datasources) {
+      for (DataSegment dataSegment : dataSource.getSegments()) {
+        Map<String, Map<String, Object>> interval = retVal.get(dataSegment.getInterval());
+        if (interval == null) {
+          Map<String, Map<String, Object>> tmp = Maps.newHashMap();
+          retVal.put(dataSegment.getInterval(), tmp);
         }
+        setProperties(retVal, dataSource, dataSegment);
       }
+    }
 
-      return Response.ok(retVal).build();
+    return Response.ok(retVal).build();
   }
 
   @GET
@@ -82,16 +97,22 @@ public class IntervalsResource
   public Response getSpecificIntervals(
       @PathParam("interval") String interval,
       @QueryParam("simple") String simple,
-      @QueryParam("full") String full
+      @QueryParam("full") String full,
+      @Context final HttpServletRequest req
   )
   {
-    final Interval theInterval = new Interval(interval.replace("_", "/"));
-    final Set<DruidDataSource> datasources = InventoryViewUtils.getDataSources(serverInventoryView);
+    final Interval theInterval = Intervals.of(interval.replace("_", "/"));
+    final Set<ImmutableDruidDataSource> datasources = InventoryViewUtils.getSecuredDataSources(
+        req,
+        serverInventoryView,
+        authorizerMapper
+    );
 
     final Comparator<Interval> comparator = Comparators.inverse(Comparators.intervalsByStartThenEnd());
+
     if (full != null) {
       final Map<Interval, Map<String, Map<String, Object>>> retVal = Maps.newTreeMap(comparator);
-      for (DruidDataSource dataSource : datasources) {
+      for (ImmutableDruidDataSource dataSource : datasources) {
         for (DataSegment dataSegment : dataSource.getSegments()) {
           if (theInterval.contains(dataSegment.getInterval())) {
             Map<String, Map<String, Object>> dataSourceInterval = retVal.get(dataSegment.getInterval());
@@ -109,7 +130,7 @@ public class IntervalsResource
 
     if (simple != null) {
       final Map<Interval, Map<String, Object>> retVal = Maps.newHashMap();
-      for (DruidDataSource dataSource : datasources) {
+      for (ImmutableDruidDataSource dataSource : datasources) {
         for (DataSegment dataSegment : dataSource.getSegments()) {
           if (theInterval.contains(dataSegment.getInterval())) {
             Map<String, Object> properties = retVal.get(dataSegment.getInterval());
@@ -131,7 +152,7 @@ public class IntervalsResource
     }
 
     final Map<String, Object> retVal = Maps.newHashMap();
-    for (DruidDataSource dataSource : datasources) {
+    for (ImmutableDruidDataSource dataSource : datasources) {
       for (DataSegment dataSegment : dataSource.getSegments()) {
         if (theInterval.contains(dataSegment.getInterval())) {
           retVal.put("size", MapUtils.getLong(retVal, "size", 0L) + dataSegment.getSize());
@@ -145,7 +166,9 @@ public class IntervalsResource
 
   private void setProperties(
       final Map<Interval, Map<String, Map<String, Object>>> retVal,
-      DruidDataSource dataSource, DataSegment dataSegment) {
+      ImmutableDruidDataSource dataSource, DataSegment dataSegment
+  )
+  {
     Map<String, Object> properties = retVal.get(dataSegment.getInterval()).get(dataSource.getName());
     if (properties == null) {
       properties = Maps.newHashMap();

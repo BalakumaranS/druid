@@ -34,6 +34,9 @@ Available Metrics
 |`query/node/bytes`|number of bytes returned from querying individual historical/realtime nodes.|id, status, server.| |
 |`query/node/ttfb`|Time to first byte. Milliseconds elapsed until broker starts receiving the response from individual historical/realtime nodes.|id, status, server.|< 1s|
 |`query/intervalChunk/time`|Only emitted if interval chunking is enabled. Milliseconds required to query an interval chunk.|id, status, chunkInterval (if interval chunking is enabled).|< 1s|
+|`query/success/count`|number of queries successfully processed|This metric is only available if the QueryCountStatsMonitor module is included.||
+|`query/failed/count`|number of failed queries|This metric is only available if the QueryCountStatsMonitor module is included.||
+|`query/interrupted/count`|number of queries interrupted due to cancellation or timeout|This metric is only available if the QueryCountStatsMonitor module is included.||
 
 ### Historical
 
@@ -45,6 +48,9 @@ Available Metrics
 |`segment/scan/pending`|Number of segments in queue waiting to be scanned.||Close to 0|
 |`query/segmentAndCache/time`|Milliseconds taken to query individual segment or hit the cache (if it is enabled on the historical node).|id, segment.|several hundred milliseconds|
 |`query/cpu/time`|Microseconds of CPU time taken to complete a query|Common: dataSource, type, interval, hasFilters, duration, context, remoteAddress, id. Aggregation Queries: numMetrics, numComplexMetrics. GroupBy: numDimensions. TopN: threshold, dimension.|Varies|
+|`query/success/count`|number of queries successfully processed|This metric is only available if the QueryCountStatsMonitor module is included.||
+|`query/failed/count`|number of failed queries|This metric is only available if the QueryCountStatsMonitor module is included.||
+|`query/interrupted/count`|number of queries interrupted due to cancellation or timeout|This metric is only available if the QueryCountStatsMonitor module is included.||
 
 ### Real-time
 
@@ -53,11 +59,20 @@ Available Metrics
 |`query/time`|Milliseconds taken to complete a query.|Common: dataSource, type, interval, hasFilters, duration, context, remoteAddress, id. Aggregation Queries: numMetrics, numComplexMetrics. GroupBy: numDimensions. TopN: threshold, dimension.|< 1s|
 |`query/wait/time`|Milliseconds spent waiting for a segment to be scanned.|id, segment.|several hundred milliseconds|
 |`segment/scan/pending`|Number of segments in queue waiting to be scanned.||Close to 0|
+|`query/success/count`|number of queries successfully processed|This metric is only available if the QueryCountStatsMonitor module is included.||
+|`query/failed/count`|number of failed queries|This metric is only available if the QueryCountStatsMonitor module is included.||
+|`query/interrupted/count`|number of queries interrupted due to cancellation or timeout|This metric is only available if the QueryCountStatsMonitor module is included.||
+
+### Jetty
+
+|Metric|Description|Normal Value|
+|------|-----------|------------|
+|`jetty/numOpenConnections`|Number of open jetty connections.|Not much higher than number of jetty threads.|
 
 ### Cache
 
-|Metric|Description|Dimensions|Normal Value|
-|------|-----------|----------|------------|
+|Metric|Description|Normal Value|
+|------|-----------|------------|
 |`query/cache/delta/*`|Cache metrics since the last emission.||N/A|
 |`query/cache/total/*`|Total cache metrics.||N/A|
 
@@ -97,12 +112,16 @@ These metrics are only available if the RealtimeMetricsMonitor is included in th
 |`ingest/persists/count`|Number of times persist occurred.|dataSource.|Depends on configuration.|
 |`ingest/persists/time`|Milliseconds spent doing intermediate persist.|dataSource.|Depends on configuration. Generally a few minutes at most.|
 |`ingest/persists/cpu`|Cpu time in Nanoseconds spent on doing intermediate persist.|dataSource.|Depends on configuration. Generally a few minutes at most.|
-|`ingest/persists/backPressure`|Number of persists pending.|dataSource.|0|
+|`ingest/persists/backPressure`|Milliseconds spent creating persist tasks and blocking waiting for them to finish.|dataSource.|0 or very low|
 |`ingest/persists/failed`|Number of persists that failed.|dataSource.|0|
 |`ingest/handoff/failed`|Number of handoffs that failed.|dataSource.|0|
 |`ingest/merge/time`|Milliseconds spent merging intermediate segments|dataSource.|Depends on configuration. Generally a few minutes at most.|
 |`ingest/merge/cpu`|Cpu time in Nanoseconds spent on merging intermediate segments.|dataSource.|Depends on configuration. Generally a few minutes at most.|
 |`ingest/handoff/count`|Number of handoffs that happened.|dataSource.|Varies. Generally greater than 0 once every segment granular period if cluster operating normally|
+|`ingest/sink/count`|Number of sinks not handoffed.|dataSource.|1~3|
+|`ingest/events/messageGap`|Time gap between the data time in event and current system time.|dataSource.|Greater than 0, depends on the time carried in event |
+|`ingest/kafka/lag`|Applicable for Kafka Indexing Service. Total lag between the offsets consumed by the Kafka indexing tasks and latest offsets in Kafka brokers across all partitions. Minimum emission period for this metric is a minute.|dataSource.|Greater than 0, should not be a very high number |
+
 
 Note: If the JVM does not support CPU time measurement for the current thread, ingest/merge/cpu and ingest/persists/cpu will be 0. 
 
@@ -136,6 +155,10 @@ These metrics are for the Druid coordinator and are reset each time the coordina
 |`segment/size`|Size in bytes of available segments.|dataSource.|Varies.|
 |`segment/count`|Number of available segments.|dataSource.|< max|
 |`segment/overShadowed/count`|Number of overShadowed segments.||Varies.|
+|`segment/unavailable/count`|Number of segments (not including replicas) left to load until segments that should be loaded in the cluster are available for queries.|datasource.|0|
+|`segment/underReplicated/count`|Number of segments (including replicas) left to load until segments that should be loaded in the cluster are available for queries.|tier, datasource.|0|
+
+If `emitBalancingStats` is set to `true` in the coordinator [dynamic configuration](../configuration/coordinator.html#dynamic-configuration), then [log entries](../configuration/logging.html) for class `io.druid.server.coordinator.helper.DruidCoordinatorLogger` will have extra information on balancing decisions.
 
 ## General Health
 
@@ -147,6 +170,7 @@ These metrics are for the Druid coordinator and are reset each time the coordina
 |`segment/used`|Bytes used for served segments.|dataSource, tier, priority.|< max|
 |`segment/usedPercent`|Percentage of space used by served segments.|dataSource, tier, priority.|< 100%|
 |`segment/count`|Number of served segments.|dataSource, tier, priority.|Varies.|
+|`segment/pendingDelete`|On-disk size in bytes of segments that are waiting to be cleared out|Varies.|
 
 ### JVM
 

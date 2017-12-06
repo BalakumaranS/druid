@@ -22,7 +22,8 @@ package io.druid.query.topn;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
-import io.druid.granularity.QueryGranularity;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.granularity.Granularities;
 import io.druid.query.Result;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.CountAggregatorFactory;
@@ -32,11 +33,13 @@ import io.druid.query.aggregation.post.ArithmeticPostAggregator;
 import io.druid.query.aggregation.post.ConstantPostAggregator;
 import io.druid.query.aggregation.post.FieldAccessPostAggregator;
 import io.druid.query.dimension.DefaultDimensionSpec;
+import io.druid.query.ordering.StringComparators;
 import org.joda.time.DateTime;
 import org.junit.Assert;
 import org.junit.Test;
 
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -62,7 +65,7 @@ public class TopNBinaryFnTest
   final List<PostAggregator> postAggregators = Arrays.<PostAggregator>asList(
       addrowsindexconstant
   );
-  private final DateTime currTime = new DateTime();
+  private final DateTime currTime = DateTimes.nowUtc();
 
   private void assertTopNMergeResult(Object o1, Object o2)
   {
@@ -142,8 +145,7 @@ public class TopNBinaryFnTest
     );
 
     Result<TopNResultValue> actual = new TopNBinaryFn(
-        TopNResultMerger.identity,
-        QueryGranularity.ALL,
+        Granularities.ALL,
         new DefaultDimensionSpec("testdim", null),
         new NumericTopNMetricSpec("index"),
         2,
@@ -206,7 +208,7 @@ public class TopNBinaryFnTest
     );
 
     Result<TopNResultValue> expected = new Result<TopNResultValue>(
-        new DateTime(QueryGranularity.DAY.truncate(currTime.getMillis())),
+        Granularities.DAY.bucketStart(currTime),
         new TopNResultValue(
             ImmutableList.<Map<String, Object>>of(
                 ImmutableMap.<String, Object>of(
@@ -224,8 +226,7 @@ public class TopNBinaryFnTest
     );
 
     Result<TopNResultValue> actual = new TopNBinaryFn(
-        TopNResultMerger.identity,
-        QueryGranularity.DAY,
+        Granularities.DAY,
         new DefaultDimensionSpec("testdim", null),
         new NumericTopNMetricSpec("index"),
         2,
@@ -269,8 +270,7 @@ public class TopNBinaryFnTest
     Result<TopNResultValue> expected = result1;
 
     Result<TopNResultValue> actual = new TopNBinaryFn(
-        TopNResultMerger.identity,
-        QueryGranularity.ALL,
+        Granularities.ALL,
         new DefaultDimensionSpec("testdim", null),
         new NumericTopNMetricSpec("index"),
         2,
@@ -365,8 +365,7 @@ public class TopNBinaryFnTest
     );
 
     Result<TopNResultValue> actual = new TopNBinaryFn(
-        TopNResultMerger.identity,
-        QueryGranularity.ALL,
+        Granularities.ALL,
         new DefaultDimensionSpec("testdim", null),
         new NumericTopNMetricSpec("addrowsindexconstant"),
         3,
@@ -447,10 +446,66 @@ public class TopNBinaryFnTest
     );
 
     Result<TopNResultValue> actual = new TopNBinaryFn(
-        TopNResultMerger.identity,
-        QueryGranularity.ALL,
+        Granularities.ALL,
         new DefaultDimensionSpec("testdim", null),
         new NumericTopNMetricSpec("index"),
+        2,
+        aggregatorFactories,
+        postAggregators
+    ).apply(
+        result1,
+        result2
+    );
+    Assert.assertEquals(expected.getTimestamp(), actual.getTimestamp());
+    assertTopNMergeResult(expected.getValue(), actual.getValue());
+  }
+
+  @Test
+  public void testMergeLexicographicWithInvalidDimName()
+  {
+    Result<TopNResultValue> result1 = new Result<TopNResultValue>(
+        currTime,
+        new TopNResultValue(
+            ImmutableList.<Map<String, Object>>of(
+                ImmutableMap.<String, Object>of(
+                    "rows", 1L,
+                    "index", 2L,
+                    "testdim", "1"
+                )
+            )
+        )
+    );
+    Result<TopNResultValue> result2 = new Result<TopNResultValue>(
+        currTime,
+        new TopNResultValue(
+            ImmutableList.<Map<String, Object>>of(
+                ImmutableMap.<String, Object>of(
+                    "rows", 2L,
+                    "index", 3L,
+                    "testdim", "1"
+                )
+            )
+        )
+    );
+
+    Map<String, Object> resultMap = new HashMap<>();
+    resultMap.put("INVALID_DIM_NAME", null);
+    resultMap.put("rows", 3L);
+    resultMap.put("index", 5L);
+
+    Result<TopNResultValue> expected = new Result<TopNResultValue>(
+        currTime,
+        new TopNResultValue(
+            ImmutableList.<Map<String, Object>>of(
+                resultMap
+            )
+        )
+    );
+
+    Result<TopNResultValue> actual = new TopNBinaryFn(
+        Granularities.ALL,
+        new DefaultDimensionSpec("INVALID_DIM_NAME", null),
+        new DimensionTopNMetricSpec(null, StringComparators.LEXICOGRAPHIC),
         2,
         aggregatorFactories,
         postAggregators

@@ -21,30 +21,36 @@ package io.druid.server.coordination;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.base.Preconditions;
+
+import java.util.Objects;
 
 /**
  */
 public class DruidServerMetadata
 {
   private final String name;
-  private final String host;
+  private final String hostAndPort;
+  private final String hostAndTlsPort;
   private final long maxSize;
   private final String tier;
-  private final String type;
+  private final ServerType type;
   private final int priority;
 
   @JsonCreator
   public DruidServerMetadata(
       @JsonProperty("name") String name,
-      @JsonProperty("host") String host,
+      @JsonProperty("host") String hostAndPort,
+      @JsonProperty("hostAndTlsPort") String hostAndTlsPort,
       @JsonProperty("maxSize") long maxSize,
-      @JsonProperty("type") String type,
+      @JsonProperty("type") ServerType type,
       @JsonProperty("tier") String tier,
       @JsonProperty("priority") int priority
   )
   {
-    this.name = name;
-    this.host = host;
+    this.name = Preconditions.checkNotNull(name);
+    this.hostAndPort = hostAndPort;
+    this.hostAndTlsPort = hostAndTlsPort;
     this.maxSize = maxSize;
     this.tier = tier;
     this.type = type;
@@ -57,10 +63,21 @@ public class DruidServerMetadata
     return name;
   }
 
-  @JsonProperty
   public String getHost()
   {
-    return host;
+    return getHostAndTlsPort() != null ? getHostAndTlsPort() : getHostAndPort();
+  }
+
+  @JsonProperty("host")
+  public String getHostAndPort()
+  {
+    return hostAndPort;
+  }
+
+  @JsonProperty
+  public String getHostAndTlsPort()
+  {
+    return hostAndTlsPort;
   }
 
   @JsonProperty
@@ -76,7 +93,7 @@ public class DruidServerMetadata
   }
 
   @JsonProperty
-  public String getType()
+  public ServerType getType()
   {
     return type;
   }
@@ -87,9 +104,9 @@ public class DruidServerMetadata
     return priority;
   }
 
-  public boolean isAssignable()
+  public boolean segmentReplicatable()
   {
-    return getType().equalsIgnoreCase("historical") || getType().equalsIgnoreCase("bridge");
+    return type.isSegmentReplicationTarget();
   }
 
   @Override
@@ -102,40 +119,33 @@ public class DruidServerMetadata
       return false;
     }
 
-    DruidServerMetadata metadata = (DruidServerMetadata) o;
+    DruidServerMetadata that = (DruidServerMetadata) o;
 
-    if (maxSize != metadata.maxSize) {
+    if (!name.equals(that.name)) {
       return false;
     }
-    if (priority != metadata.priority) {
+    if (!Objects.equals(hostAndPort, that.hostAndPort)) {
       return false;
     }
-    if (host != null ? !host.equals(metadata.host) : metadata.host != null) {
+    if (!Objects.equals(hostAndTlsPort, that.hostAndTlsPort)) {
       return false;
     }
-    if (name != null ? !name.equals(metadata.name) : metadata.name != null) {
+    if (maxSize != that.maxSize) {
       return false;
     }
-    if (tier != null ? !tier.equals(metadata.tier) : metadata.tier != null) {
+    if (!Objects.equals(tier, that.tier)) {
       return false;
     }
-    if (type != null ? !type.equals(metadata.type) : metadata.type != null) {
+    if (type != that.type) {
       return false;
     }
-
-    return true;
+    return priority == that.priority;
   }
 
   @Override
   public int hashCode()
   {
-    int result = name != null ? name.hashCode() : 0;
-    result = 31 * result + (host != null ? host.hashCode() : 0);
-    result = 31 * result + (int) (maxSize ^ (maxSize >>> 32));
-    result = 31 * result + (tier != null ? tier.hashCode() : 0);
-    result = 31 * result + (type != null ? type.hashCode() : 0);
-    result = 31 * result + priority;
-    return result;
+    return Objects.hash(name, hostAndPort, hostAndTlsPort, maxSize, tier, type, priority);
   }
 
   @Override
@@ -143,11 +153,12 @@ public class DruidServerMetadata
   {
     return "DruidServerMetadata{" +
            "name='" + name + '\'' +
-           ", host='" + host + '\'' +
+           ", hostAndPort='" + hostAndPort + '\'' +
+           ", hostAndTlsPort='" + hostAndTlsPort + '\'' +
            ", maxSize=" + maxSize +
            ", tier='" + tier + '\'' +
-           ", type='" + type + '\'' +
-           ", priority='" + priority + '\'' +
+           ", type=" + type +
+           ", priority=" + priority +
            '}';
   }
 }

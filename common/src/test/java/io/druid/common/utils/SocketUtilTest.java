@@ -19,10 +19,11 @@
 
 package io.druid.common.utils;
 
-import com.metamx.common.ISE;
 import org.hamcrest.number.OrderingComparison;
 import org.junit.Assert;
 import org.junit.Test;
+
+import io.druid.java.util.common.ISE;
 
 public class SocketUtilTest
 {
@@ -31,8 +32,8 @@ public class SocketUtilTest
   public void testSocketUtil()
   {
     int port = SocketUtil.findOpenPort(0);
-    Assert.assertThat("Port is greater than the maximum port 0xffff",port, OrderingComparison.lessThanOrEqualTo(MAX_PORT));
-    Assert.assertThat("Port is less than minimum port 0",port, OrderingComparison.greaterThanOrEqualTo(0));
+    Assert.assertThat("Port is greater than the maximum port 0xffff", port, OrderingComparison.lessThanOrEqualTo(MAX_PORT));
+    Assert.assertThat("Port is less than minimum port 0", port, OrderingComparison.greaterThanOrEqualTo(0));
   }
 
   @Test(expected = IllegalArgumentException.class)

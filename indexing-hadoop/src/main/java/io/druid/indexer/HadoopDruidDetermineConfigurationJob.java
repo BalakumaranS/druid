@@ -22,11 +22,11 @@ package io.druid.indexer;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.inject.Inject;
-import com.metamx.common.logger.Logger;
+
+import io.druid.java.util.common.logger.Logger;
 import io.druid.timeline.partition.HashBasedNumberedShardSpec;
 import io.druid.timeline.partition.NoneShardSpec;
 import org.joda.time.DateTime;
-import org.joda.time.DateTimeComparator;
 import org.joda.time.Interval;
 
 import java.util.List;
@@ -58,7 +58,7 @@ public class HadoopDruidDetermineConfigurationJob implements Jobby
       jobs.add(config.getPartitionsSpec().getPartitionJob(config));
     } else {
       int shardsPerInterval = config.getPartitionsSpec().getNumShards();
-      Map<DateTime, List<HadoopyShardSpec>> shardSpecs = Maps.newTreeMap(DateTimeComparator.getInstance());
+      Map<Long, List<HadoopyShardSpec>> shardSpecs = Maps.newTreeMap();
       int shardCount = 0;
       for (Interval segmentGranularity : config.getSegmentGranularIntervals().get()) {
         DateTime bucket = segmentGranularity.getStart();
@@ -67,16 +67,21 @@ public class HadoopDruidDetermineConfigurationJob implements Jobby
           for (int i = 0; i < shardsPerInterval; i++) {
             specs.add(
                 new HadoopyShardSpec(
-                    new HashBasedNumberedShardSpec(i, shardsPerInterval, HadoopDruidIndexerConfig.JSON_MAPPER),
+                    new HashBasedNumberedShardSpec(
+                        i,
+                        shardsPerInterval,
+                        config.getPartitionsSpec().getPartitionDimensions(),
+                        HadoopDruidIndexerConfig.JSON_MAPPER
+                    ),
                     shardCount++
                 )
             );
           }
-          shardSpecs.put(bucket, specs);
+          shardSpecs.put(bucket.getMillis(), specs);
           log.info("DateTime[%s], spec[%s]", bucket, specs);
         } else {
-          final HadoopyShardSpec spec = new HadoopyShardSpec(new NoneShardSpec(), shardCount++);
-          shardSpecs.put(bucket, Lists.newArrayList(spec));
+          final HadoopyShardSpec spec = new HadoopyShardSpec(NoneShardSpec.instance(), shardCount++);
+          shardSpecs.put(bucket.getMillis(), Lists.newArrayList(spec));
           log.info("DateTime[%s], spec[%s]", bucket, spec);
         }
       }

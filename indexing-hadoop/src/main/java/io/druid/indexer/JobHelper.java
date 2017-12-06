@@ -21,21 +21,23 @@ package io.druid.indexer;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.common.base.Predicate;
+import com.google.common.base.Strings;
 import com.google.common.base.Throwables;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Sets;
 import com.google.common.io.ByteStreams;
 import com.google.common.io.Files;
 import com.google.common.io.OutputSupplier;
-import com.metamx.common.FileUtils;
-import com.metamx.common.IAE;
-import com.metamx.common.ISE;
-import com.metamx.common.RetryUtils;
-import com.metamx.common.logger.Logger;
 import io.druid.indexer.updater.HadoopDruidConverterConfig;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.FileUtils;
+import io.druid.java.util.common.IAE;
+import io.druid.java.util.common.IOE;
+import io.druid.java.util.common.ISE;
+import io.druid.java.util.common.RetryUtils;
+import io.druid.java.util.common.StringUtils;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.segment.ProgressIndicator;
 import io.druid.segment.SegmentUtils;
-import io.druid.segment.loading.DataSegmentPusherUtil;
+import io.druid.segment.loading.DataSegmentPusher;
 import io.druid.timeline.DataSegment;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
@@ -45,10 +47,11 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.retry.RetryPolicies;
 import org.apache.hadoop.io.retry.RetryProxy;
 import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.hadoop.mapreduce.TaskAttemptID;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.Progressable;
-import org.joda.time.DateTime;
 
 import java.io.BufferedOutputStream;
 import java.io.File;
@@ -61,7 +64,6 @@ import java.net.URISyntaxException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -75,9 +77,6 @@ import java.util.zip.ZipOutputStream;
 public class JobHelper
 {
   private static final Logger log = new Logger(JobHelper.class);
-
-  private static final Set<Path> existing = Sets.newHashSet();
-
   private static final int NUM_RETRIES = 8;
   private static final int SECONDS_BETWEEN_RETRIES = 2;
   private static final int DEFAULT_FS_BUFFER_SIZE = 1 << 18; // 256KB
@@ -91,6 +90,36 @@ public class JobHelper
   public static Path distributedClassPath(Path base)
   {
     return new Path(base, "classpath");
+  }
+  public static final String INDEX_ZIP = "index.zip";
+  public static final String DESCRIPTOR_JSON = "descriptor.json";
+
+  /**
+   * Dose authenticate against a secured hadoop cluster
+   * In case of any bug fix make sure to fix the code at HdfsStorageAuthentication#authenticate as well.
+   *
+   * @param config containing the principal name and keytab path.
+   */
+  public static void authenticate(HadoopDruidIndexerConfig config)
+  {
+    String principal = config.HADOOP_KERBEROS_CONFIG.getPrincipal();
+    String keytab = config.HADOOP_KERBEROS_CONFIG.getKeytab();
+    if (!Strings.isNullOrEmpty(principal) && !Strings.isNullOrEmpty(keytab)) {
+      Configuration conf = new Configuration();
+      UserGroupInformation.setConfiguration(conf);
+      if (UserGroupInformation.isSecurityEnabled()) {
+        try {
+          if (UserGroupInformation.getCurrentUser().hasKerberosCredentials() == false
+              || !UserGroupInformation.getCurrentUser().getUserName().equals(principal)) {
+            log.info("trying to authenticate user [%s] with keytab [%s]", principal, keytab);
+            UserGroupInformation.loginUserFromKeytab(principal, keytab);
+          }
+        }
+        catch (IOException e) {
+          throw new ISE(e, "Failed to authenticate user principal [%s] with keytab [%s]", principal, keytab);
+        }
+      }
+    }
   }
 
   /**
@@ -198,13 +227,7 @@ public class JobHelper
         log.info("Renaming jar to path[%s]", hdfsPath);
         fs.rename(intermediateHdfsPath, hdfsPath);
         if (!fs.exists(hdfsPath)) {
-          throw new IOException(
-              String.format(
-                  "File does not exist even after moving from[%s] to [%s]",
-                  intermediateHdfsPath,
-                  hdfsPath
-              )
-          );
+          throw new IOE("File does not exist even after moving from[%s] to [%s]", intermediateHdfsPath, hdfsPath);
         }
       }
       catch (IOException e) {
@@ -250,11 +273,9 @@ public class JobHelper
   {
     // Snapshot jars are uploaded to non shared intermediate directory.
     final Path hdfsPath = new Path(intermediateClassPath, jarFile.getName());
-
-    // existing is used to prevent uploading file multiple times in same run.
-    if (!existing.contains(hdfsPath)) {
+    // Prevent uploading same file multiple times in same run.
+    if (!fs.exists(hdfsPath)) {
       uploadJar(jarFile, hdfsPath, fs);
-      existing.add(hdfsPath);
     }
     job.addFileToClassPath(hdfsPath);
   }
@@ -285,6 +306,29 @@ public class JobHelper
     injectSystemProperties(job.getConfiguration());
   }
 
+  public static void injectDruidProperties(Configuration configuration, List<String> listOfAllowedPrefix)
+  {
+    String mapJavaOpts = Strings.nullToEmpty(configuration.get(MRJobConfig.MAP_JAVA_OPTS));
+    String reduceJavaOpts = Strings.nullToEmpty(configuration.get(MRJobConfig.REDUCE_JAVA_OPTS));
+
+    for (String propName : System.getProperties().stringPropertyNames()) {
+      for (String prefix : listOfAllowedPrefix) {
+        if (propName.equals(prefix) || propName.startsWith(prefix + ".")) {
+          mapJavaOpts = StringUtils.format("%s -D%s=%s", mapJavaOpts, propName, System.getProperty(propName));
+          reduceJavaOpts = StringUtils.format("%s -D%s=%s", reduceJavaOpts, propName, System.getProperty(propName));
+          break;
+        }
+      }
+
+    }
+    if (!Strings.isNullOrEmpty(mapJavaOpts)) {
+      configuration.set(MRJobConfig.MAP_JAVA_OPTS, mapJavaOpts);
+    }
+    if (!Strings.isNullOrEmpty(reduceJavaOpts)) {
+      configuration.set(MRJobConfig.REDUCE_JAVA_OPTS, reduceJavaOpts);
+    }
+  }
+
   public static Configuration injectSystemProperties(Configuration conf)
   {
     for (String propName : System.getProperties().stringPropertyNames()) {
@@ -297,11 +341,12 @@ public class JobHelper
 
   public static void ensurePaths(HadoopDruidIndexerConfig config)
   {
+    authenticate(config);
     // config.addInputPaths() can have side-effects ( boo! :( ), so this stuff needs to be done before anything else
     try {
       Job job = Job.getInstance(
           new Configuration(),
-          String.format("%s-determine_partitions-%s", config.getDataSource(), config.getIntervals())
+          StringUtils.format("%s-determine_partitions-%s", config.getDataSource(), config.getIntervals())
       );
 
       job.getConfiguration().set("io.sort.record.percent", "0.19");
@@ -321,7 +366,7 @@ public class JobHelper
     for (Jobby job : jobs) {
       if (failedMessage == null) {
         if (!job.run()) {
-          failedMessage = String.format("Job[%s] failed!", job.getClass());
+          failedMessage = StringUtils.format("Job[%s] failed!", job.getClass());
         }
       }
     }
@@ -331,7 +376,9 @@ public class JobHelper
         Path workingPath = config.makeIntermediatePath();
         log.info("Deleting path[%s]", workingPath);
         try {
-          workingPath.getFileSystem(injectSystemProperties(new Configuration())).delete(workingPath, true);
+          Configuration conf = injectSystemProperties(new Configuration());
+          config.addJobProperties(conf);
+          workingPath.getFileSystem(conf).delete(workingPath, true);
         }
         catch (IOException e) {
           log.error(e, "Failed to cleanup path[%s]", workingPath);
@@ -350,14 +397,15 @@ public class JobHelper
       final DataSegment segmentTemplate,
       final Configuration configuration,
       final Progressable progressable,
-      final TaskAttemptID taskAttemptID,
       final File mergedBase,
-      final Path segmentBasePath
+      final Path finalIndexZipFilePath,
+      final Path finalDescriptorPath,
+      final Path tmpPath,
+      DataSegmentPusher dataSegmentPusher
   )
       throws IOException
   {
-    final FileSystem outputFS = FileSystem.get(segmentBasePath.toUri(), configuration);
-    final Path tmpPath = new Path(segmentBasePath, String.format("index.zip.%d", taskAttemptID.getId()));
+    final FileSystem outputFS = FileSystem.get(finalIndexZipFilePath.toUri(), configuration);
     final AtomicLong size = new AtomicLong(0L);
     final DataPusher zipPusher = (DataPusher) RetryProxy.create(
         DataPusher.class, new DataPusher()
@@ -372,7 +420,6 @@ public class JobHelper
                 progressable
             )) {
               size.set(zipAndCopyDir(mergedBase, outputStream, progressable));
-              outputStream.flush();
             }
             catch (IOException | RuntimeException exception) {
               log.error(exception, "Exception in retry loop");
@@ -386,52 +433,24 @@ public class JobHelper
     zipPusher.push();
     log.info("Zipped %,d bytes to [%s]", size.get(), tmpPath.toUri());
 
-    final Path finalIndexZipFilePath = new Path(segmentBasePath, "index.zip");
     final URI indexOutURI = finalIndexZipFilePath.toUri();
-    final ImmutableMap<String, Object> loadSpec;
-    // TODO: Make this a part of Pushers or Pullers
-    switch (outputFS.getScheme()) {
-      case "hdfs":
-        loadSpec = ImmutableMap.<String, Object>of(
-            "type", "hdfs",
-            "path", indexOutURI.toString()
-        );
-        break;
-      case "s3":
-      case "s3n":
-        loadSpec = ImmutableMap.<String, Object>of(
-            "type", "s3_zip",
-            "bucket", indexOutURI.getHost(),
-            "key", indexOutURI.getPath().substring(1) // remove the leading "/"
-        );
-        break;
-      case "file":
-        loadSpec = ImmutableMap.<String, Object>of(
-            "type", "local",
-            "path", indexOutURI.getPath()
-        );
-        break;
-      default:
-        throw new IAE("Unknown file system scheme [%s]", outputFS.getScheme());
-    }
     final DataSegment finalSegment = segmentTemplate
-        .withLoadSpec(loadSpec)
+        .withLoadSpec(dataSegmentPusher.makeLoadSpec(indexOutURI))
         .withSize(size.get())
         .withBinaryVersion(SegmentUtils.getVersionFromDir(mergedBase));
 
     if (!renameIndexFiles(outputFS, tmpPath, finalIndexZipFilePath)) {
-      throw new IOException(
-          String.format(
-              "Unable to rename [%s] to [%s]",
-              tmpPath.toUri().toString(),
-              finalIndexZipFilePath.toUri().toString()
-          )
+      throw new IOE(
+          "Unable to rename [%s] to [%s]",
+          tmpPath.toUri().toString(),
+          finalIndexZipFilePath.toUri().toString()
       );
     }
+
     writeSegmentDescriptor(
         outputFS,
         finalSegment,
-        new Path(segmentBasePath, "descriptor.json"),
+        finalDescriptorPath,
         progressable
     );
     return finalSegment;
@@ -455,7 +474,7 @@ public class JobHelper
               progressable.progress();
               if (outputFS.exists(descriptorPath)) {
                 if (!outputFS.delete(descriptorPath, false)) {
-                  throw new IOException(String.format("Failed to delete descriptor at [%s]", descriptorPath));
+                  throw new IOE("Failed to delete descriptor at [%s]", descriptorPath);
                 }
               }
               try (final OutputStream descriptorOut = outputFS.create(
@@ -541,16 +560,33 @@ public class JobHelper
     out.putNextEntry(new ZipEntry(file.getName()));
   }
 
-  public static Path makeSegmentOutputPath(
-      Path basePath,
-      FileSystem fileSystem,
-      DataSegment segment
+  public static Path makeFileNamePath(
+      final Path basePath,
+      final FileSystem fs,
+      final DataSegment segmentTemplate,
+      final String baseFileName,
+      DataSegmentPusher dataSegmentPusher
   )
   {
-    String segmentDir = "hdfs".equals(fileSystem.getScheme())
-                        ? DataSegmentPusherUtil.getHdfsStorageDir(segment)
-                        : DataSegmentPusherUtil.getStorageDir(segment);
-    return new Path(prependFSIfNullScheme(fileSystem, basePath), String.format("./%s", segmentDir));
+    return new Path(prependFSIfNullScheme(fs, basePath),
+                    dataSegmentPusher.makeIndexPathName(segmentTemplate, baseFileName));
+  }
+
+  public static Path makeTmpPath(
+      final Path basePath,
+      final FileSystem fs,
+      final DataSegment segmentTemplate,
+      final TaskAttemptID taskAttemptID,
+      DataSegmentPusher dataSegmentPusher
+  )
+  {
+    return new Path(
+        prependFSIfNullScheme(fs, basePath),
+        StringUtils.format("./%s.%d",
+                           dataSegmentPusher.makeIndexPathName(segmentTemplate, JobHelper.INDEX_ZIP),
+                           taskAttemptID.getId()
+        )
+    );
   }
 
   /**
@@ -588,10 +624,10 @@ public class JobHelper
                   log.info(
                       "File[%s / %s / %sB] existed, but wasn't the same as [%s / %s / %sB]",
                       finalIndexZipFile.getPath(),
-                      new DateTime(finalIndexZipFile.getModificationTime()),
+                      DateTimes.utc(finalIndexZipFile.getModificationTime()),
                       finalIndexZipFile.getLen(),
                       zipFile.getPath(),
-                      new DateTime(zipFile.getModificationTime()),
+                      DateTimes.utc(zipFile.getModificationTime()),
                       zipFile.getLen()
                   );
                   outputFS.delete(finalIndexZipFilePath, false);
@@ -600,7 +636,7 @@ public class JobHelper
                   log.info(
                       "File[%s / %s / %sB] existed and will be kept",
                       finalIndexZipFile.getPath(),
-                      new DateTime(finalIndexZipFile.getModificationTime()),
+                      DateTimes.utc(finalIndexZipFile.getModificationTime()),
                       finalIndexZipFile.getLen()
                   );
                   needRename = false;
@@ -698,9 +734,25 @@ public class JobHelper
     final String type = loadSpec.get("type").toString();
     final URI segmentLocURI;
     if ("s3_zip".equals(type)) {
-      segmentLocURI = URI.create(String.format("s3n://%s/%s", loadSpec.get("bucket"), loadSpec.get("key")));
+      if ("s3a".equals(loadSpec.get("S3Schema"))) {
+        segmentLocURI = URI.create(StringUtils.format("s3a://%s/%s", loadSpec.get("bucket"), loadSpec.get("key")));
+
+      } else {
+        segmentLocURI = URI.create(StringUtils.format("s3n://%s/%s", loadSpec.get("bucket"), loadSpec.get("key")));
+      }
     } else if ("hdfs".equals(type)) {
       segmentLocURI = URI.create(loadSpec.get("path").toString());
+    } else if ("google".equals(type)) {
+      // Segment names contain : in their path.
+      // Google Cloud Storage supports : but Hadoop does not.
+      // This becomes an issue when re-indexing using the current segments.
+      // The Hadoop getSplits code doesn't understand the : and returns "Relative path in absolute URI"
+      // This could be fixed using the same code that generates path names for hdfs segments using
+      // getHdfsStorageDir. But that wouldn't fix this issue for people who already have segments with ":".
+      // Because of this we just URL encode the : making everything work as it should.
+      segmentLocURI = URI.create(
+          StringUtils.format("gs://%s/%s", loadSpec.get("bucket"), loadSpec.get("path").toString().replace(":", "%3A"))
+      );
     } else if ("local".equals(type)) {
       try {
         segmentLocURI = new URI("file", null, loadSpec.get("path").toString(), null, null);
@@ -753,23 +805,37 @@ public class JobHelper
       public void startSection(String section)
       {
         context.progress();
-        context.setStatus(String.format("STARTED [%s]", section));
-      }
-
-      @Override
-      public void progressSection(String section, String message)
-      {
-        log.info("Progress message for section [%s] : [%s]", section, message);
-        context.progress();
-        context.setStatus(String.format("PROGRESS [%s]", section));
+        context.setStatus(StringUtils.format("STARTED [%s]", section));
       }
 
       @Override
       public void stopSection(String section)
       {
         context.progress();
-        context.setStatus(String.format("STOPPED [%s]", section));
+        context.setStatus(StringUtils.format("STOPPED [%s]", section));
       }
     };
+  }
+
+  public static boolean deleteWithRetry(final FileSystem fs, final Path path, final boolean recursive)
+  {
+    try {
+      return RetryUtils.retry(
+          new Callable<Boolean>()
+          {
+            @Override
+            public Boolean call() throws Exception
+            {
+              return fs.delete(path, recursive);
+            }
+          },
+          shouldRetryPredicate(),
+          NUM_RETRIES
+      );
+    }
+    catch (Exception e) {
+      log.error(e, "Failed to cleanup path[%s]", path);
+      throw Throwables.propagate(e);
+    }
   }
 }

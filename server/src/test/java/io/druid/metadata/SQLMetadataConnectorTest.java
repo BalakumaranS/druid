@@ -18,6 +18,7 @@
  */
 package io.druid.metadata;
 
+import io.druid.java.util.common.StringUtils;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Rule;
@@ -37,7 +38,8 @@ public class SQLMetadataConnectorTest
   private MetadataStorageTablesConfig tablesConfig;
 
   @Before
-  public void setUp() throws Exception {
+  public void setUp() throws Exception
+  {
     connector = derbyConnectorRule.getConnector();
     tablesConfig = derbyConnectorRule.metadataTablesConfigSupplier().get();
   }
@@ -54,12 +56,14 @@ public class SQLMetadataConnectorTest
     tables.add(tablesConfig.getLogTable(entryType));
     tables.add(tablesConfig.getEntryTable(entryType));
     tables.add(tablesConfig.getAuditTable());
+    tables.add(tablesConfig.getSupervisorTable());
 
     connector.createSegmentTable();
     connector.createConfigTable();
     connector.createRulesTable();
     connector.createTaskTables();
     connector.createAuditTable();
+    connector.createSupervisorsTable();
 
     connector.getDBI().withHandle(
         new HandleCallback<Void>()
@@ -69,7 +73,7 @@ public class SQLMetadataConnectorTest
           {
             for (String table : tables) {
               Assert.assertTrue(
-                  String.format("table %s was not created!", table),
+                  StringUtils.format("table %s was not created!", table),
                   connector.tableExists(handle, table)
               );
             }
@@ -92,16 +96,28 @@ public class SQLMetadataConnectorTest
 
     Assert.assertNull(connector.lookup(tableName, "name", "payload", "emperor"));
 
-    connector.insertOrUpdate(tableName, "name", "payload", "emperor", "penguin".getBytes());
+    connector.insertOrUpdate(
+        tableName,
+        "name",
+        "payload",
+        "emperor",
+        StringUtils.toUtf8("penguin")
+    );
     Assert.assertArrayEquals(
-        "penguin".getBytes(),
+        StringUtils.toUtf8("penguin"),
         connector.lookup(tableName, "name", "payload", "emperor")
     );
 
-    connector.insertOrUpdate(tableName, "name", "payload", "emperor", "penguin chick".getBytes());
+    connector.insertOrUpdate(
+        tableName,
+        "name",
+        "payload",
+        "emperor",
+        StringUtils.toUtf8("penguin chick")
+    );
 
     Assert.assertArrayEquals(
-        "penguin chick".getBytes(),
+        StringUtils.toUtf8("penguin chick"),
         connector.lookup(tableName, "name", "payload", "emperor")
     );
 
@@ -116,7 +132,7 @@ public class SQLMetadataConnectorTest
           @Override
           public Void withHandle(Handle handle) throws Exception
           {
-            handle.createStatement(String.format("DROP TABLE %s", tableName))
+            handle.createStatement(StringUtils.format("DROP TABLE %s", tableName))
                   .execute();
             return null;
           }

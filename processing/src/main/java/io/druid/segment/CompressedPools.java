@@ -20,10 +20,11 @@
 package io.druid.segment;
 
 import com.google.common.base.Supplier;
-import com.metamx.common.logger.Logger;
 import com.ning.compress.BufferRecycler;
+import io.druid.collections.NonBlockingPool;
 import io.druid.collections.ResourceHolder;
 import io.druid.collections.StupidPool;
+import io.druid.java.util.common.logger.Logger;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -36,7 +37,8 @@ public class CompressedPools
   private static final Logger log = new Logger(CompressedPools.class);
 
   public static final int BUFFER_SIZE = 0x10000;
-  private static final StupidPool<BufferRecycler> bufferRecyclerPool = new StupidPool<BufferRecycler>(
+  private static final NonBlockingPool<BufferRecycler> bufferRecyclerPool = new StupidPool<>(
+      "bufferRecyclerPool",
       new Supplier<BufferRecycler>()
       {
         private final AtomicLong counter = new AtomicLong(0);
@@ -55,7 +57,8 @@ public class CompressedPools
     return bufferRecyclerPool.take();
   }
 
-  private static final StupidPool<byte[]> outputBytesPool = new StupidPool<byte[]>(
+  private static final NonBlockingPool<byte[]> outputBytesPool = new StupidPool<byte[]>(
+      "outputBytesPool",
       new Supplier<byte[]>()
       {
         private final AtomicLong counter = new AtomicLong(0);
@@ -74,7 +77,8 @@ public class CompressedPools
     return outputBytesPool.take();
   }
 
-  private static final StupidPool<ByteBuffer> bigEndByteBufPool = new StupidPool<ByteBuffer>(
+  private static final NonBlockingPool<ByteBuffer> bigEndByteBufPool = new StupidPool<ByteBuffer>(
+      "bigEndByteBufPool",
       new Supplier<ByteBuffer>()
       {
         private final AtomicLong counter = new AtomicLong(0);
@@ -88,7 +92,8 @@ public class CompressedPools
       }
   );
 
-  private static final StupidPool<ByteBuffer> littleEndByteBufPool = new StupidPool<ByteBuffer>(
+  private static final NonBlockingPool<ByteBuffer> littleEndByteBufPool = new StupidPool<ByteBuffer>(
+      "littleEndByteBufPool",
       new Supplier<ByteBuffer>()
       {
         private final AtomicLong counter = new AtomicLong(0);

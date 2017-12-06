@@ -19,11 +19,9 @@
 
 package io.druid.query.aggregation;
 
-import io.druid.segment.LongColumnSelector;
-
 /**
  */
-public class TestLongColumnSelector implements LongColumnSelector
+public class TestLongColumnSelector extends io.druid.segment.TestLongColumnSelector
 {
   private final long[] longs;
 
@@ -35,7 +33,7 @@ public class TestLongColumnSelector implements LongColumnSelector
   }
 
   @Override
-  public long get()
+  public long getLong()
   {
     return longs[index];
   }

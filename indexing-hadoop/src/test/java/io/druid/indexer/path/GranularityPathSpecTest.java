@@ -19,24 +19,29 @@
 
 package io.druid.indexer.path;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
-import com.metamx.common.Granularity;
-import io.druid.granularity.QueryGranularity;
 import io.druid.indexer.HadoopDruidIndexerConfig;
 import io.druid.indexer.HadoopIOConfig;
 import io.druid.indexer.HadoopIngestionSpec;
 import io.druid.indexer.HadoopTuningConfig;
 import io.druid.jackson.DefaultObjectMapper;
+import io.druid.java.util.common.Intervals;
+import io.druid.java.util.common.StringUtils;
+import io.druid.java.util.common.granularity.Granularities;
+import io.druid.java.util.common.granularity.Granularity;
+import io.druid.java.util.common.granularity.PeriodGranularity;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.segment.indexing.DataSchema;
 import io.druid.segment.indexing.granularity.UniformGranularitySpec;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.joda.time.Interval;
+import org.joda.time.DateTimeZone;
+import org.joda.time.Period;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -44,8 +49,33 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
+import java.io.IOException;
+import java.util.Arrays;
+
 public class GranularityPathSpecTest
 {
+  private static final HadoopTuningConfig DEFAULT_TUNING_CONFIG = new HadoopTuningConfig(
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      false,
+      false,
+      false,
+      false,
+      null,
+      false,
+      false,
+      null,
+      null,
+      null,
+      false,
+      false,
+      null
+  );
+
   private GranularityPathSpec granularityPathSpec;
   private final String TEST_STRING_PATH = "TEST";
   private final String TEST_STRING_PATTERN = "*.TEST";
@@ -56,37 +86,43 @@ public class GranularityPathSpecTest
   @Rule
   public final TemporaryFolder testFolder = new TemporaryFolder();
 
-  @Before public void setUp()
+  @Before
+  public void setUp()
   {
     granularityPathSpec = new GranularityPathSpec();
   }
 
-  @After public void tearDown()
+  @After
+  public void tearDown()
   {
     granularityPathSpec = null;
   }
 
-  @Test public void testSetInputPath()
+  @Test
+  public void testSetInputPath()
   {
     granularityPathSpec.setInputPath(TEST_STRING_PATH);
-    Assert.assertEquals(TEST_STRING_PATH,granularityPathSpec.getInputPath());
+    Assert.assertEquals(TEST_STRING_PATH, granularityPathSpec.getInputPath());
   }
 
-  @Test public void testSetFilePattern()
+  @Test
+  public void testSetFilePattern()
   {
     granularityPathSpec.setFilePattern(TEST_STRING_PATTERN);
-    Assert.assertEquals(TEST_STRING_PATTERN,granularityPathSpec.getFilePattern());
+    Assert.assertEquals(TEST_STRING_PATTERN, granularityPathSpec.getFilePattern());
   }
 
-  @Test public void testSetPathFormat()
+  @Test
+  public void testSetPathFormat()
   {
     granularityPathSpec.setPathFormat(TEST_STRING_FORMAT);
-    Assert.assertEquals(TEST_STRING_FORMAT,granularityPathSpec.getPathFormat());
+    Assert.assertEquals(TEST_STRING_FORMAT, granularityPathSpec.getPathFormat());
   }
 
-  @Test public void testSetDataGranularity()
+  @Test
+  public void testSetDataGranularity()
   {
-    Granularity granularity = Granularity.DAY;
+    Granularity granularity = Granularities.DAY;
     granularityPathSpec.setDataGranularity(granularity);
     Assert.assertEquals(granularity, granularityPathSpec.getDataGranularity());
   }
@@ -94,13 +130,13 @@ public class GranularityPathSpecTest
   @Test
   public void testSerdeCustomInputFormat() throws Exception
   {
-    testSerde("/test/path", "*.test", "pat_pat", Granularity.SECOND, TextInputFormat.class);
+    testSerde("/test/path", "*.test", "pat_pat", Granularities.SECOND, TextInputFormat.class);
   }
 
   @Test
   public void testSerdeNoInputFormat() throws Exception
   {
-    testSerde("/test/path", "*.test", "pat_pat", Granularity.SECOND, null);
+    testSerde("/test/path", "*.test", "pat_pat", Granularities.SECOND, null);
   }
 
   @Test
@@ -113,17 +149,18 @@ public class GranularityPathSpecTest
             null,
             new AggregatorFactory[0],
             new UniformGranularitySpec(
-                Granularity.DAY,
-                QueryGranularity.MINUTE,
-                ImmutableList.of(new Interval("2015-11-06T00:00Z/2015-11-07T00:00Z"))
+                Granularities.DAY,
+                Granularities.MINUTE,
+                ImmutableList.of(Intervals.of("2015-11-06T00:00Z/2015-11-07T00:00Z"))
             ),
+            null,
             jsonMapper
         ),
         new HadoopIOConfig(null, null, null),
-        new HadoopTuningConfig(null, null, null, null, null, null, false, false, false, false, null, false, false, null, null, null)
+        DEFAULT_TUNING_CONFIG
     );
 
-    granularityPathSpec.setDataGranularity(Granularity.HOUR);
+    granularityPathSpec.setDataGranularity(Granularities.HOUR);
     granularityPathSpec.setFilePattern(".*");
     granularityPathSpec.setInputFormat(TextInputFormat.class);
 
@@ -145,13 +182,84 @@ public class GranularityPathSpecTest
     String actual = job.getConfiguration().get("mapreduce.input.multipleinputs.dir.formats");
 
     String expected = Joiner.on(",").join(Lists.newArrayList(
-        String.format(formatStr, testFolder.getRoot(), "test/y=2015/m=11/d=06/H=00/file1"),
-        String.format(formatStr, testFolder.getRoot(), "test/y=2015/m=11/d=06/H=02/file2"),
-        String.format(formatStr, testFolder.getRoot(), "test/y=2015/m=11/d=06/H=05/file3"),
-        String.format(formatStr, testFolder.getRoot(), "test/y=2015/m=11/d=06/H=05/file4")
+        StringUtils.format(formatStr, testFolder.getRoot(), "test/y=2015/m=11/d=06/H=00/file1"),
+        StringUtils.format(formatStr, testFolder.getRoot(), "test/y=2015/m=11/d=06/H=02/file2"),
+        StringUtils.format(formatStr, testFolder.getRoot(), "test/y=2015/m=11/d=06/H=05/file3"),
+        StringUtils.format(formatStr, testFolder.getRoot(), "test/y=2015/m=11/d=06/H=05/file4")
     ));
 
     Assert.assertEquals("Did not find expected input paths", expected, actual);
+  }
+
+  @Test
+  public void testIntervalTrimming() throws Exception
+  {
+    UserGroupInformation.setLoginUser(UserGroupInformation.createUserForTesting("test", new String[]{"testGroup"}));
+    HadoopIngestionSpec spec = new HadoopIngestionSpec(
+        new DataSchema(
+            "foo",
+            null,
+            new AggregatorFactory[0],
+            new UniformGranularitySpec(
+                Granularities.DAY,
+                Granularities.ALL,
+                ImmutableList.of(Intervals.of("2015-01-01T11Z/2015-01-02T05Z"))
+            ),
+            null,
+            jsonMapper
+        ),
+        new HadoopIOConfig(null, null, null),
+        DEFAULT_TUNING_CONFIG
+    );
+
+    granularityPathSpec.setDataGranularity(Granularities.HOUR);
+    granularityPathSpec.setPathFormat("yyyy/MM/dd/HH");
+    granularityPathSpec.setFilePattern(".*");
+    granularityPathSpec.setInputFormat(TextInputFormat.class);
+
+    Job job = Job.getInstance();
+    String formatStr = "file:%s/%s;org.apache.hadoop.mapreduce.lib.input.TextInputFormat";
+
+    createFile(
+        testFolder,
+        "test/2015/01/01/00/file1", "test/2015/01/01/10/file2", "test/2015/01/01/18/file3", "test/2015/01/02/00/file1",
+        "test/2015/01/02/03/file2", "test/2015/01/02/05/file3", "test/2015/01/02/07/file4", "test/2015/01/02/09/file5"
+    );
+
+    granularityPathSpec.setInputPath(testFolder.getRoot().getPath() + "/test");
+
+    granularityPathSpec.addInputPaths(HadoopDruidIndexerConfig.fromSpec(spec), job);
+
+    String actual = job.getConfiguration().get("mapreduce.input.multipleinputs.dir.formats");
+
+    String expected = Joiner.on(",").join(
+        Lists.newArrayList(
+            StringUtils.format(formatStr, testFolder.getRoot(), "test/2015/01/01/18/file3"),
+            StringUtils.format(formatStr, testFolder.getRoot(), "test/2015/01/02/00/file1"),
+            StringUtils.format(formatStr, testFolder.getRoot(), "test/2015/01/02/03/file2")
+        )
+    );
+
+    Assert.assertEquals("Did not find expected input paths", expected, actual);
+  }
+
+  @Test
+  public void testBackwardCompatiblePeriodSegmentGranularitySerialization() throws JsonProcessingException
+  {
+    final PeriodGranularity pt2S = new PeriodGranularity(new Period("PT2S"), null, DateTimeZone.UTC);
+    Assert.assertNotEquals("\"SECOND\"", jsonMapper.writeValueAsString(pt2S));
+    final Granularity pt1S = Granularities.SECOND;
+    Assert.assertEquals("\"SECOND\"", jsonMapper.writeValueAsString(pt1S));
+  }
+
+  private void createFile(TemporaryFolder folder, String... files) throws IOException
+  {
+    for (String file : files) {
+      String[] split = file.split("/");
+      Assert.assertTrue(split.length > 1);
+      folder.newFolder(Arrays.copyOfRange(split, 0, split.length - 1));
+      folder.newFile(file);
+    }
   }
 
   private void testSerde(
@@ -171,11 +279,11 @@ public class GranularityPathSpecTest
     sb.append("\"pathFormat\" : \"");
     sb.append(pathFormat);
     sb.append("\",");
-    sb.append("\"dataGranularity\" : \"");
+    sb.append("\"dataGranularity\" : ");
     // Double-check Jackson's lower-case enum support
-    sb.append(granularity.toString().toLowerCase());
-    sb.append("\",");
-    if(inputFormat != null) {
+    sb.append(jsonMapper.writeValueAsString(granularity));
+    sb.append(",");
+    if (inputFormat != null) {
       sb.append("\"inputFormat\" : \"");
       sb.append(inputFormat.getName());
       sb.append("\",");

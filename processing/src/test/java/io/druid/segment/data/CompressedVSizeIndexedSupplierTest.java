@@ -21,6 +21,7 @@ package io.druid.segment.data;
 
 import com.google.common.base.Function;
 import com.google.common.collect.Iterables;
+import io.druid.java.util.common.io.Closer;
 import io.druid.segment.CompressedVSizeIndexedSupplier;
 import org.junit.After;
 import org.junit.Assert;
@@ -40,6 +41,7 @@ import java.util.List;
  */
 public class CompressedVSizeIndexedSupplierTest
 {
+  private Closer closer;
   protected List<int[]> vals;
 
   protected WritableSupplier<IndexedMultivalue<IndexedInts>> indexedSupplier;
@@ -47,6 +49,7 @@ public class CompressedVSizeIndexedSupplierTest
   @Before
   public void setUpSimple()
   {
+    closer = Closer.create();
     vals = Arrays.asList(
         new int[1],
         new int[]{1, 2, 3, 4, 5},
@@ -65,16 +68,20 @@ public class CompressedVSizeIndexedSupplierTest
                 return VSizeIndexedInts.fromArray(input, 20);
               }
             }
-        ), 20, ByteOrder.nativeOrder(),
-        CompressedObjectStrategy.CompressionStrategy.LZ4
+        ),
+        20,
+        ByteOrder.nativeOrder(),
+        CompressionStrategy.LZ4,
+        closer
     );
   }
 
   @After
-  public void teardown()
+  public void teardown() throws IOException
   {
     indexedSupplier = null;
     vals = null;
+    closer.close();
   }
 
   @Test
@@ -87,13 +94,12 @@ public class CompressedVSizeIndexedSupplierTest
   public void testSerde() throws IOException
   {
     final ByteArrayOutputStream baos = new ByteArrayOutputStream();
-    indexedSupplier.writeToChannel(Channels.newChannel(baos));
+    indexedSupplier.writeTo(Channels.newChannel(baos), null);
 
     final byte[] bytes = baos.toByteArray();
     Assert.assertEquals(indexedSupplier.getSerializedSize(), bytes.length);
     WritableSupplier<IndexedMultivalue<IndexedInts>> deserializedIndexed = fromByteBuffer(
-        ByteBuffer.wrap(bytes),
-        ByteOrder.nativeOrder()
+        ByteBuffer.wrap(bytes)
     );
 
     assertSame(vals, deserializedIndexed.get());
@@ -115,11 +121,8 @@ public class CompressedVSizeIndexedSupplierTest
       final IndexedInts vSizeIndexedInts = iterator.next();
 
       Assert.assertEquals(ints.length, vSizeIndexedInts.size());
-      Iterator<Integer> valsIterator = vSizeIndexedInts.iterator();
-      int j = 0;
-      while (valsIterator.hasNext()) {
-        Assert.assertEquals((Integer) ints[j], valsIterator.next());
-        j++;
+      for (int i = 0; i < vSizeIndexedInts.size(); i++) {
+        Assert.assertEquals(ints[i], vSizeIndexedInts.get(i));
       }
       row++;
     }
@@ -139,10 +142,11 @@ public class CompressedVSizeIndexedSupplierTest
     }
   }
 
-  protected WritableSupplier<IndexedMultivalue<IndexedInts>> fromByteBuffer(ByteBuffer buffer, ByteOrder order)
+  protected WritableSupplier<IndexedMultivalue<IndexedInts>> fromByteBuffer(ByteBuffer buffer)
   {
     return CompressedVSizeIndexedSupplier.fromByteBuffer(
-        buffer, ByteOrder.nativeOrder()
+        buffer,
+        ByteOrder.nativeOrder()
     );
   }
 }

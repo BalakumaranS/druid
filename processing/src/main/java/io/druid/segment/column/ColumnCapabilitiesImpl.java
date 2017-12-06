@@ -20,7 +20,7 @@
 package io.druid.segment.column;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.metamx.common.ISE;
+import io.druid.java.util.common.ISE;
 
 /**
  */
@@ -66,12 +66,6 @@ public class ColumnCapabilitiesImpl implements ColumnCapabilities
     return runLengthEncoded;
   }
 
-  public ColumnCapabilitiesImpl setRunLengthEncoded(boolean runLengthEncoded)
-  {
-    this.runLengthEncoded = runLengthEncoded;
-    return this;
-  }
-
   @Override
   @JsonProperty("hasBitmapIndexes")
   public boolean hasBitmapIndexes()
@@ -111,7 +105,6 @@ public class ColumnCapabilitiesImpl implements ColumnCapabilities
     return this;
   }
 
-  @Override
   public ColumnCapabilitiesImpl merge(ColumnCapabilities other)
   {
     if (other == null) {

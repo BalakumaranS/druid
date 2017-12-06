@@ -24,8 +24,12 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
 import com.google.common.primitives.Ints;
 import com.google.common.primitives.Longs;
-import com.metamx.common.guava.CloseQuietly;
+import io.druid.java.util.common.StringUtils;
+import io.druid.java.util.common.guava.CloseQuietly;
+import io.druid.java.util.common.io.Closer;
 import io.druid.segment.CompressedPools;
+import it.unimi.dsi.fastutil.ints.IntArrayList;
+import it.unimi.dsi.fastutil.ints.IntArrays;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -38,12 +42,11 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.Channels;
-import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -53,14 +56,14 @@ public class CompressedVSizeIntsIndexedSupplierTest extends CompressionStrategyT
   @Parameterized.Parameters(name = "{index}: compression={0}, byteOrder={1}")
   public static Iterable<Object[]> compressionStrategies()
   {
-    final Iterable<CompressedObjectStrategy.CompressionStrategy> compressionStrategies = Iterables.transform(
+    final Iterable<CompressionStrategy> compressionStrategies = Iterables.transform(
         CompressionStrategyTest.compressionStrategies(),
-        new Function<Object[], CompressedObjectStrategy.CompressionStrategy>()
+        new Function<Object[], CompressionStrategy>()
         {
           @Override
-          public CompressedObjectStrategy.CompressionStrategy apply(Object[] input)
+          public CompressionStrategy apply(Object[] input)
           {
-            return (CompressedObjectStrategy.CompressionStrategy) input[0];
+            return (CompressionStrategy) input[0];
           }
         }
     );
@@ -82,14 +85,15 @@ public class CompressedVSizeIntsIndexedSupplierTest extends CompressionStrategyT
     );
   }
 
-  private static final int[] MAX_VALUES = new int[] { 0xFF, 0xFFFF, 0xFFFFFF, 0x0FFFFFFF };
+  private static final int[] MAX_VALUES = new int[] {0xFF, 0xFFFF, 0xFFFFFF, 0x0FFFFFFF};
 
-  public CompressedVSizeIntsIndexedSupplierTest(CompressedObjectStrategy.CompressionStrategy compressionStrategy, ByteOrder byteOrder)
+  public CompressedVSizeIntsIndexedSupplierTest(CompressionStrategy compressionStrategy, ByteOrder byteOrder)
   {
     super(compressionStrategy);
     this.byteOrder = byteOrder;
   }
 
+  private Closer closer;
   private IndexedInts indexed;
   private CompressedVSizeIntsIndexedSupplier supplier;
   private int[] vals;
@@ -99,6 +103,7 @@ public class CompressedVSizeIntsIndexedSupplierTest extends CompressionStrategyT
   @Before
   public void setUp() throws Exception
   {
+    closer = Closer.create();
     CloseQuietly.close(indexed);
     indexed = null;
     supplier = null;
@@ -109,6 +114,7 @@ public class CompressedVSizeIntsIndexedSupplierTest extends CompressionStrategyT
   public void tearDown() throws Exception
   {
     CloseQuietly.close(indexed);
+    closer.close();
   }
 
   private void setupSimple(final int chunkSize)
@@ -118,11 +124,12 @@ public class CompressedVSizeIntsIndexedSupplierTest extends CompressionStrategyT
     vals = new int[]{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16};
 
     supplier = CompressedVSizeIntsIndexedSupplier.fromList(
-        Ints.asList(vals),
+        IntArrayList.wrap(vals),
         Ints.max(vals),
         chunkSize,
         ByteOrder.nativeOrder(),
-        compressionStrategy
+        compressionStrategy,
+        closer
     );
 
     indexed = supplier.get();
@@ -141,9 +148,9 @@ public class CompressedVSizeIntsIndexedSupplierTest extends CompressionStrategyT
 
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
     final CompressedVSizeIntsIndexedSupplier theSupplier = CompressedVSizeIntsIndexedSupplier.fromList(
-        Ints.asList(vals), Ints.max(vals), chunkSize, byteOrder, compressionStrategy
+        IntArrayList.wrap(vals), Ints.max(vals), chunkSize, byteOrder, compressionStrategy, closer
     );
-    theSupplier.writeToChannel(Channels.newChannel(baos));
+    theSupplier.writeTo(Channels.newChannel(baos), null);
 
     final byte[] bytes = baos.toByteArray();
     Assert.assertEquals(theSupplier.getSerializedSize(), bytes.length);
@@ -156,7 +163,7 @@ public class CompressedVSizeIntsIndexedSupplierTest extends CompressionStrategyT
   {
     vals = new int[totalSize];
     Random rand = new Random(0);
-    for(int i = 0; i < vals.length; ++i) {
+    for (int i = 0; i < vals.length; ++i) {
       // VSizeIndexed only allows positive values
       vals[i] = rand.nextInt(maxValue);
     }
@@ -207,12 +214,13 @@ public class CompressedVSizeIntsIndexedSupplierTest extends CompressionStrategyT
   @Test
   public void testChunkTooBig() throws Exception
   {
-    for(int maxValue : MAX_VALUES) {
+    for (int maxValue : MAX_VALUES) {
       final int maxChunkSize = CompressedVSizeIntsIndexedSupplier.maxIntsInBufferForValue(maxValue);
       try {
         setupLargeChunks(maxChunkSize + 1, 10 * (maxChunkSize + 1), maxValue);
         Assert.fail();
-      } catch(IllegalArgumentException e) {
+      }
+      catch (IllegalArgumentException e) {
         Assert.assertTrue("chunk too big for maxValue " + maxValue, true);
       }
     }
@@ -279,7 +287,7 @@ public class CompressedVSizeIntsIndexedSupplierTest extends CompressionStrategyT
               final long indexedVal = indexed.get(j);
               if (Longs.compare(val, indexedVal) != 0) {
                 failureHappened.set(true);
-                reason.set(String.format("Thread1[%d]: %d != %d", j, val, indexedVal));
+                reason.set(StringUtils.format("Thread1[%d]: %d != %d", j, val, indexedVal));
                 stopLatch.countDown();
                 return;
               }
@@ -318,7 +326,7 @@ public class CompressedVSizeIntsIndexedSupplierTest extends CompressionStrategyT
                 final long indexedVal = indexed2.get(j);
                 if (Longs.compare(val, indexedVal) != 0) {
                   failureHappened.set(true);
-                  reason.set(String.format("Thread2[%d]: %d != %d", j, val, indexedVal));
+                  reason.set(StringUtils.format("Thread2[%d]: %d != %d", j, val, indexedVal));
                   stopLatch.countDown();
                   return;
                 }
@@ -352,7 +360,7 @@ public class CompressedVSizeIntsIndexedSupplierTest extends CompressionStrategyT
   {
     Assert.assertEquals(vals.length, indexed.size());
 
-    // sequential access
+    // sequential access of every element
     int[] indices = new int[vals.length];
     for (int i = 0; i < indexed.size(); ++i) {
       final int expected = vals[i];
@@ -361,9 +369,10 @@ public class CompressedVSizeIntsIndexedSupplierTest extends CompressionStrategyT
       indices[i] = i;
     }
 
-    Collections.shuffle(Arrays.asList(indices));
-    // random access
-    for (int i = 0; i < indexed.size(); ++i) {
+    // random access, limited to 1000 elements for large lists (every element would take too long)
+    IntArrays.shuffle(indices, ThreadLocalRandom.current());
+    final int limit = Math.min(indexed.size(), 1000);
+    for (int i = 0; i < limit; ++i) {
       int k = indices[i];
       Assert.assertEquals(vals[k], indexed.get(k));
     }

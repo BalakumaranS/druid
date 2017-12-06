@@ -23,19 +23,20 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.metamx.common.StringUtils;
-import io.druid.common.utils.JodaUtils;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.Intervals;
+import io.druid.java.util.common.StringUtils;
 import io.druid.query.BaseQuery;
 import io.druid.query.DataSource;
+import io.druid.query.Druids;
 import io.druid.query.Query;
 import io.druid.query.Result;
+import io.druid.query.filter.DimFilter;
 import io.druid.query.spec.MultipleIntervalSegmentSpec;
 import io.druid.query.spec.QuerySegmentSpec;
 import org.joda.time.DateTime;
-import org.joda.time.Interval;
 
 import java.nio.ByteBuffer;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -43,15 +44,13 @@ import java.util.Map;
  */
 public class TimeBoundaryQuery extends BaseQuery<Result<TimeBoundaryResultValue>>
 {
-  public static final Interval MY_Y2K_INTERVAL = new Interval(
-      new DateTime("0000-01-01"),
-      new DateTime("3000-01-01")
-  );
+  private static final QuerySegmentSpec DEFAULT_SEGMENT_SPEC = new MultipleIntervalSegmentSpec(Intervals.ONLY_ETERNITY);
   public static final String MAX_TIME = "maxTime";
   public static final String MIN_TIME = "minTime";
 
   private static final byte CACHE_TYPE_ID = 0x0;
 
+  private final DimFilter dimFilter;
   private final String bound;
 
   @JsonCreator
@@ -59,24 +58,27 @@ public class TimeBoundaryQuery extends BaseQuery<Result<TimeBoundaryResultValue>
       @JsonProperty("dataSource") DataSource dataSource,
       @JsonProperty("intervals") QuerySegmentSpec querySegmentSpec,
       @JsonProperty("bound") String bound,
+      @JsonProperty("filter") DimFilter dimFilter,
       @JsonProperty("context") Map<String, Object> context
   )
   {
-    super(
-        dataSource,
-        (querySegmentSpec == null) ? new MultipleIntervalSegmentSpec(Arrays.asList(MY_Y2K_INTERVAL))
-                                   : querySegmentSpec,
-        false,
-        context
-    );
+    super(dataSource, querySegmentSpec == null ? DEFAULT_SEGMENT_SPEC : querySegmentSpec, false, context);
 
+    this.dimFilter = dimFilter;
     this.bound = bound == null ? "" : bound;
   }
 
   @Override
   public boolean hasFilters()
   {
-    return false;
+    return dimFilter != null;
+  }
+
+  @JsonProperty("filter")
+  @Override
+  public DimFilter getFilter()
+  {
+    return dimFilter;
   }
 
   @Override
@@ -94,43 +96,33 @@ public class TimeBoundaryQuery extends BaseQuery<Result<TimeBoundaryResultValue>
   @Override
   public TimeBoundaryQuery withOverriddenContext(Map<String, Object> contextOverrides)
   {
-    return new TimeBoundaryQuery(
-        getDataSource(),
-        getQuerySegmentSpec(),
-        bound,
-        computeOverridenContext(contextOverrides)
-    );
+    Map<String, Object> newContext = computeOverriddenContext(getContext(), contextOverrides);
+    return Druids.TimeBoundaryQueryBuilder.copy(this).context(newContext).build();
   }
 
   @Override
   public TimeBoundaryQuery withQuerySegmentSpec(QuerySegmentSpec spec)
   {
-    return new TimeBoundaryQuery(
-        getDataSource(),
-        spec,
-        bound,
-        getContext()
-    );
+    return Druids.TimeBoundaryQueryBuilder.copy(this).intervals(spec).build();
   }
 
   @Override
   public Query<Result<TimeBoundaryResultValue>> withDataSource(DataSource dataSource)
   {
-    return new TimeBoundaryQuery(
-        dataSource,
-        getQuerySegmentSpec(),
-        bound,
-        getContext()
-    );
+    return Druids.TimeBoundaryQueryBuilder.copy(this).dataSource(dataSource).build();
   }
 
   public byte[] getCacheKey()
   {
+    final byte[] filterBytes = dimFilter == null ? new byte[] {} : dimFilter.getCacheKey();
     final byte[] boundBytes = StringUtils.toUtf8(bound);
-    return ByteBuffer.allocate(1 + boundBytes.length)
-                     .put(CACHE_TYPE_ID)
-                     .put(boundBytes)
-                     .array();
+    final byte delimiter = (byte) 0xff;
+    return ByteBuffer.allocate(2 + boundBytes.length + filterBytes.length)
+        .put(CACHE_TYPE_ID)
+        .put(boundBytes)
+        .put(delimiter)
+        .put(filterBytes)
+        .array();
   }
 
   public Iterable<Result<TimeBoundaryResultValue>> buildResult(DateTime timestamp, DateTime min, DateTime max)
@@ -157,8 +149,8 @@ public class TimeBoundaryQuery extends BaseQuery<Result<TimeBoundaryResultValue>
       return Lists.newArrayList();
     }
 
-    DateTime min = new DateTime(JodaUtils.MAX_INSTANT);
-    DateTime max = new DateTime(JodaUtils.MIN_INSTANT);
+    DateTime min = DateTimes.MAX;
+    DateTime max = DateTimes.MIN;
     for (Result<TimeBoundaryResultValue> result : results) {
       TimeBoundaryResultValue val = result.getValue();
 
@@ -176,11 +168,11 @@ public class TimeBoundaryQuery extends BaseQuery<Result<TimeBoundaryResultValue>
     final DateTime minTime;
     final DateTime maxTime;
 
-    if (bound.equalsIgnoreCase(MIN_TIME)) {
+    if (isMinTime()) {
       ts = min;
       minTime = min;
       maxTime = null;
-    } else if (bound.equalsIgnoreCase(MAX_TIME)) {
+    } else if (isMaxTime()) {
       ts = max;
       minTime = null;
       maxTime = max;
@@ -193,15 +185,26 @@ public class TimeBoundaryQuery extends BaseQuery<Result<TimeBoundaryResultValue>
     return buildResult(ts, minTime, maxTime);
   }
 
+  boolean isMinTime()
+  {
+    return bound.equalsIgnoreCase(MIN_TIME);
+  }
+
+  boolean isMaxTime()
+  {
+    return bound.equalsIgnoreCase(MAX_TIME);
+  }
+
   @Override
   public String toString()
   {
     return "TimeBoundaryQuery{" +
-           "dataSource='" + getDataSource() + '\'' +
-           ", querySegmentSpec=" + getQuerySegmentSpec() +
-           ", duration=" + getDuration() +
-           ", bound=" + bound +
-           '}';
+        "dataSource='" + getDataSource() + '\'' +
+        ", querySegmentSpec=" + getQuerySegmentSpec() +
+        ", duration=" + getDuration() +
+        ", bound=" + bound +
+        ", dimFilter=" + dimFilter +
+        '}';
   }
 
   @Override
@@ -223,6 +226,10 @@ public class TimeBoundaryQuery extends BaseQuery<Result<TimeBoundaryResultValue>
       return false;
     }
 
+    if (dimFilter != null ? !dimFilter.equals(that.dimFilter) : that.dimFilter != null) {
+      return false;
+    }
+
     return true;
   }
 
@@ -231,6 +238,7 @@ public class TimeBoundaryQuery extends BaseQuery<Result<TimeBoundaryResultValue>
   {
     int result = super.hashCode();
     result = 31 * result + bound.hashCode();
+    result = 31 * result + (dimFilter != null ? dimFilter.hashCode() : 0);
     return result;
   }
 }

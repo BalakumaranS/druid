@@ -22,9 +22,12 @@ package io.druid.segment.filter;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Predicate;
-import io.druid.query.search.search.SearchQuerySpec;
-
-import javax.annotation.Nullable;
+import io.druid.query.extraction.ExtractionFn;
+import io.druid.query.filter.DruidDoublePredicate;
+import io.druid.query.filter.DruidFloatPredicate;
+import io.druid.query.filter.DruidLongPredicate;
+import io.druid.query.filter.DruidPredicateFactory;
+import io.druid.query.search.SearchQuerySpec;
 
 /**
  */
@@ -32,20 +35,40 @@ public class SearchQueryFilter extends DimensionPredicateFilter
 {
   @JsonCreator
   public SearchQueryFilter(
-      @JsonProperty("dimension") String dimension,
-      @JsonProperty("query") final SearchQuerySpec query
+      @JsonProperty("dimension") final String dimension,
+      @JsonProperty("query") final SearchQuerySpec query,
+      @JsonProperty("extractionFn") final ExtractionFn extractionFn
   )
   {
     super(
         dimension,
-        new Predicate<String>()
+        new DruidPredicateFactory()
         {
           @Override
-          public boolean apply(@Nullable String input)
+          public Predicate<String> makeStringPredicate()
           {
-            return query.accept(input);
+            return input -> query.accept(input);
           }
-        }
+
+          @Override
+          public DruidLongPredicate makeLongPredicate()
+          {
+            return input -> query.accept(String.valueOf(input));
+          }
+
+          @Override
+          public DruidFloatPredicate makeFloatPredicate()
+          {
+            return input -> query.accept(String.valueOf(input));
+          }
+
+          @Override
+          public DruidDoublePredicate makeDoublePredicate()
+          {
+            return input -> query.accept(String.valueOf(input));
+          }
+        },
+        extractionFn
     );
   }
 }

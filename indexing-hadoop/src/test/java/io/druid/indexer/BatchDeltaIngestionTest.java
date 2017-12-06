@@ -27,16 +27,18 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
-import com.metamx.common.Granularity;
 import io.druid.data.input.Firehose;
 import io.druid.data.input.InputRow;
 import io.druid.data.input.impl.CSVParseSpec;
 import io.druid.data.input.impl.DimensionsSpec;
 import io.druid.data.input.impl.StringInputRowParser;
 import io.druid.data.input.impl.TimestampSpec;
-import io.druid.granularity.QueryGranularity;
 import io.druid.indexer.hadoop.WindowedDataSegment;
 import io.druid.jackson.DefaultObjectMapper;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.Intervals;
+import io.druid.java.util.common.StringUtils;
+import io.druid.java.util.common.granularity.Granularities;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.LongSumAggregatorFactory;
 import io.druid.query.aggregation.hyperloglog.HyperUniquesAggregatorFactory;
@@ -45,6 +47,7 @@ import io.druid.segment.QueryableIndex;
 import io.druid.segment.QueryableIndexStorageAdapter;
 import io.druid.segment.StorageAdapter;
 import io.druid.segment.indexing.DataSchema;
+import io.druid.segment.transform.TransformSpec;
 import io.druid.segment.indexing.granularity.UniformGranularitySpec;
 import io.druid.segment.loading.LocalDataSegmentPuller;
 import io.druid.segment.realtime.firehose.IngestSegmentFirehose;
@@ -52,7 +55,6 @@ import io.druid.segment.realtime.firehose.WindowedStorageAdapter;
 import io.druid.timeline.DataSegment;
 import io.druid.timeline.partition.HashBasedNumberedShardSpec;
 import org.apache.commons.io.FileUtils;
-import org.joda.time.DateTime;
 import org.joda.time.Interval;
 import org.junit.Assert;
 import org.junit.Rule;
@@ -71,8 +73,8 @@ public class BatchDeltaIngestionTest
 
   private static final ObjectMapper MAPPER;
   private static final IndexIO INDEX_IO;
-  private static final Interval INTERVAL_FULL = new Interval("2014-10-22T00:00:00Z/P1D");
-  private static final Interval INTERVAL_PARTIAL = new Interval("2014-10-22T00:00:00Z/PT2H");
+  private static final Interval INTERVAL_FULL = Intervals.of("2014-10-22T00:00:00Z/P1D");
+  private static final Interval INTERVAL_PARTIAL = Intervals.of("2014-10-22T00:00:00Z/PT2H");
   private static final DataSegment SEGMENT;
 
   static {
@@ -126,19 +128,19 @@ public class BatchDeltaIngestionTest
 
     List<ImmutableMap<String, Object>> expectedRows = ImmutableList.of(
         ImmutableMap.<String, Object>of(
-            "time", DateTime.parse("2014-10-22T00:00:00.000Z"),
+            "time", DateTimes.of("2014-10-22T00:00:00.000Z"),
             "host", ImmutableList.of("a.example.com"),
             "visited_sum", 100L,
             "unique_hosts", 1.0d
         ),
         ImmutableMap.<String, Object>of(
-            "time", DateTime.parse("2014-10-22T01:00:00.000Z"),
+            "time", DateTimes.of("2014-10-22T01:00:00.000Z"),
             "host", ImmutableList.of("b.example.com"),
             "visited_sum", 150L,
             "unique_hosts", 1.0d
         ),
         ImmutableMap.<String, Object>of(
-            "time", DateTime.parse("2014-10-22T02:00:00.000Z"),
+            "time", DateTimes.of("2014-10-22T02:00:00.000Z"),
             "host", ImmutableList.of("c.example.com"),
             "visited_sum", 200L,
             "unique_hosts", 1.0d
@@ -172,13 +174,13 @@ public class BatchDeltaIngestionTest
 
     List<ImmutableMap<String, Object>> expectedRows = ImmutableList.of(
         ImmutableMap.<String, Object>of(
-            "time", DateTime.parse("2014-10-22T00:00:00.000Z"),
+            "time", DateTimes.of("2014-10-22T00:00:00.000Z"),
             "host", ImmutableList.of("a.example.com"),
             "visited_sum", 100L,
             "unique_hosts", 1.0d
         ),
         ImmutableMap.<String, Object>of(
-            "time", DateTime.parse("2014-10-22T01:00:00.000Z"),
+            "time", DateTimes.of("2014-10-22T01:00:00.000Z"),
             "host", ImmutableList.of("b.example.com"),
             "visited_sum", 150L,
             "unique_hosts", 1.0d
@@ -249,19 +251,19 @@ public class BatchDeltaIngestionTest
 
     List<ImmutableMap<String, Object>> expectedRows = ImmutableList.of(
         ImmutableMap.<String, Object>of(
-            "time", DateTime.parse("2014-10-22T00:00:00.000Z"),
+            "time", DateTimes.of("2014-10-22T00:00:00.000Z"),
             "host", ImmutableList.of("a.example.com"),
             "visited_sum", 190L,
             "unique_hosts", 1.0d
         ),
         ImmutableMap.<String, Object>of(
-            "time", DateTime.parse("2014-10-22T01:00:00.000Z"),
+            "time", DateTimes.of("2014-10-22T01:00:00.000Z"),
             "host", ImmutableList.of("b.example.com"),
             "visited_sum", 175L,
             "unique_hosts", 1.0d
         ),
         ImmutableMap.<String, Object>of(
-            "time", DateTime.parse("2014-10-22T02:00:00.000Z"),
+            "time", DateTimes.of("2014-10-22T02:00:00.000Z"),
             "host", ImmutableList.of("c.example.com"),
             "visited_sum", 270L,
             "unique_hosts", 1.0d
@@ -281,7 +283,7 @@ public class BatchDeltaIngestionTest
     JobHelper.runJobs(ImmutableList.<Jobby>of(job), config);
 
     File segmentFolder = new File(
-        String.format(
+        StringUtils.format(
             "%s/%s/%s_%s/%s/0",
             config.getSchema().getIOConfig().getSegmentOutputPath(),
             config.getSchema().getDataSchema().getDataSource(),
@@ -321,10 +323,10 @@ public class BatchDeltaIngestionTest
 
     Firehose firehose = new IngestSegmentFirehose(
         ImmutableList.of(new WindowedStorageAdapter(adapter, windowedDataSegment.getInterval())),
+        TransformSpec.NONE,
         ImmutableList.of("host"),
         ImmutableList.of("visited_sum", "unique_hosts"),
-        null,
-        QueryGranularity.NONE
+        null
     );
 
     List<InputRow> rows = Lists.newArrayList();
@@ -346,10 +348,13 @@ public class BatchDeltaIngestionTest
                     new StringInputRowParser(
                         new CSVParseSpec(
                             new TimestampSpec("timestamp", "yyyyMMddHH", null),
-                            new DimensionsSpec(ImmutableList.of("host"), null, null),
+                            new DimensionsSpec(DimensionsSpec.getDefaultSchemas(ImmutableList.of("host")), null, null),
                             null,
-                            ImmutableList.of("timestamp", "host", "host2", "visited_num")
-                        )
+                            ImmutableList.of("timestamp", "host", "host2", "visited_num"),
+                            false,
+                            0
+                        ),
+                        null
                     ),
                     Map.class
                 ),
@@ -358,8 +363,9 @@ public class BatchDeltaIngestionTest
                     new HyperUniquesAggregatorFactory("unique_hosts", "host2")
                 },
                 new UniformGranularitySpec(
-                    Granularity.DAY, QueryGranularity.NONE, ImmutableList.of(INTERVAL_FULL)
+                    Granularities.DAY, Granularities.NONE, ImmutableList.of(INTERVAL_FULL)
                 ),
+                null,
                 MAPPER
             ),
             new HadoopIOConfig(
@@ -383,17 +389,20 @@ public class BatchDeltaIngestionTest
                 false,
                 null,
                 null,
+                null,
+                false,
+                false,
                 null
             )
         )
     );
 
     config.setShardSpecs(
-        ImmutableMap.<DateTime, List<HadoopyShardSpec>>of(
-            INTERVAL_FULL.getStart(),
+        ImmutableMap.<Long, List<HadoopyShardSpec>>of(
+            INTERVAL_FULL.getStartMillis(),
             ImmutableList.of(
                 new HadoopyShardSpec(
-                    new HashBasedNumberedShardSpec(0, 1, HadoopDruidIndexerConfig.JSON_MAPPER),
+                    new HashBasedNumberedShardSpec(0, 1, null, HadoopDruidIndexerConfig.JSON_MAPPER),
                     0
                 )
             )
@@ -416,10 +425,10 @@ public class BatchDeltaIngestionTest
 
       Assert.assertEquals(expected.get("time"), actual.getTimestamp());
       Assert.assertEquals(expected.get("host"), actual.getDimension("host"));
-      Assert.assertEquals(expected.get("visited_sum"), actual.getLongMetric("visited_sum"));
+      Assert.assertEquals(expected.get("visited_sum"), actual.getMetric("visited_sum"));
       Assert.assertEquals(
           (Double) expected.get("unique_hosts"),
-          (Double) HyperUniquesAggregatorFactory.estimateCardinality(actual.getRaw("unique_hosts")),
+          (Double) HyperUniquesAggregatorFactory.estimateCardinality(actual.getRaw("unique_hosts"), false),
           0.001
       );
     }

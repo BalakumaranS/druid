@@ -22,38 +22,45 @@ package io.druid.query.groupby;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.metamx.common.guava.Sequence;
-import com.metamx.common.guava.Sequences;
 import io.druid.data.input.MapBasedRow;
 import io.druid.data.input.Row;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.guava.Sequence;
+import io.druid.java.util.common.guava.Sequences;
 import io.druid.query.FinalizeResultsQueryRunner;
+import io.druid.query.Query;
+import io.druid.query.QueryPlus;
 import io.druid.query.QueryRunner;
 import io.druid.query.QueryRunnerFactory;
 import io.druid.query.QueryToolChest;
+import io.druid.segment.column.Column;
 import org.joda.time.DateTime;
+import org.joda.time.chrono.ISOChronology;
 
+import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 
 /**
  */
 public class GroupByQueryRunnerTestHelper
 {
-  public static Iterable<Row> runQuery(QueryRunnerFactory factory, QueryRunner runner, GroupByQuery query)
+  public static <T> Iterable<T> runQuery(QueryRunnerFactory factory, QueryRunner runner, Query<T> query)
   {
 
     QueryToolChest toolChest = factory.getToolchest();
-    QueryRunner theRunner = new FinalizeResultsQueryRunner<>(
+    QueryRunner<T> theRunner = new FinalizeResultsQueryRunner<>(
         toolChest.mergeResults(toolChest.preMergeQueryDecoration(runner)),
         toolChest
     );
 
-    Sequence<Row> queryResult = theRunner.run(query, Maps.newHashMap());
-    return Sequences.toList(queryResult, Lists.<Row>newArrayList());
+    Sequence<T> queryResult = theRunner.run(QueryPlus.wrap(query), Maps.<String, Object>newHashMap());
+    return Sequences.toList(queryResult, Lists.<T>newArrayList());
   }
 
   public static Row createExpectedRow(final String timestamp, Object... vals)
   {
-    return createExpectedRow(new DateTime(timestamp), vals);
+    return createExpectedRow(DateTimes.of(timestamp), vals);
   }
 
   public static Row createExpectedRow(final DateTime timestamp, Object... vals)
@@ -65,8 +72,26 @@ public class GroupByQueryRunnerTestHelper
       theVals.put(vals[i].toString(), vals[i + 1]);
     }
 
-    DateTime ts = new DateTime(timestamp);
-    return new MapBasedRow(ts, theVals);
+    return new MapBasedRow(timestamp, theVals);
+  }
+
+  public static List<Row> createExpectedRows(String[] columnNames, Object[]... values)
+  {
+    int timeIndex = Arrays.asList(columnNames).indexOf(Column.TIME_COLUMN_NAME);
+    Preconditions.checkArgument(timeIndex >= 0);
+
+    List<Row> expected = Lists.newArrayList();
+    for (Object[] value : values) {
+      Preconditions.checkArgument(value.length == columnNames.length);
+      Map<String, Object> theVals = Maps.newHashMapWithExpectedSize(value.length);
+      for (int i = 0; i < columnNames.length; i++) {
+        if (i != timeIndex) {
+          theVals.put(columnNames[i], value[i]);
+        }
+      }
+      expected.add(new MapBasedRow(new DateTime(value[timeIndex], ISOChronology.getInstanceUTC()), theVals));
+    }
+    return expected;
   }
 
 }

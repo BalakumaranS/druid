@@ -22,9 +22,9 @@ package io.druid.query;
 import com.google.common.base.Function;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
-import com.metamx.common.ISE;
-import com.metamx.common.guava.Sequence;
-import com.metamx.common.guava.Sequences;
+import io.druid.java.util.common.ISE;
+import io.druid.java.util.common.guava.Sequence;
+import io.druid.java.util.common.guava.Sequences;
 import io.druid.query.aggregation.MetricManipulationFn;
 import io.druid.query.aggregation.MetricManipulatorFns;
 
@@ -47,10 +47,11 @@ public class FinalizeResultsQueryRunner<T> implements QueryRunner<T>
   }
 
   @Override
-  public Sequence<T> run(final Query<T> query, Map<String, Object> responseContext)
+  public Sequence<T> run(final QueryPlus<T> queryPlus, Map<String, Object> responseContext)
   {
-    final boolean isBySegment = BaseQuery.getContextBySegment(query, false);
-    final boolean shouldFinalize = BaseQuery.getContextFinalize(query, true);
+    final Query<T> query = queryPlus.getQuery();
+    final boolean isBySegment = QueryContexts.isBySegment(query);
+    final boolean shouldFinalize = QueryContexts.isFinalize(query, true);
 
     final Query<T> queryToRun;
     final Function<T, T> finalizerFn;
@@ -100,7 +101,7 @@ public class FinalizeResultsQueryRunner<T> implements QueryRunner<T>
 
 
     return Sequences.map(
-        baseRunner.run(queryToRun, responseContext),
+        baseRunner.run(queryPlus.withQuery(queryToRun), responseContext),
         finalizerFn
     );
 

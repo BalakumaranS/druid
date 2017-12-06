@@ -23,13 +23,14 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
-import com.metamx.common.ISE;
-import com.metamx.common.logger.Logger;
+
 import io.druid.indexing.common.TaskLock;
 import io.druid.indexing.common.TaskStatus;
 import io.druid.indexing.common.TaskToolbox;
 import io.druid.indexing.common.actions.SegmentListUnusedAction;
 import io.druid.indexing.common.actions.SegmentMetadataUpdateAction;
+import io.druid.java.util.common.ISE;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.timeline.DataSegment;
 import org.joda.time.Interval;
 
@@ -54,7 +55,7 @@ public class MoveTask extends AbstractFixedIntervalTask
   )
   {
     super(
-        makeId(id, "move", dataSource, interval),
+        getOrMakeId(id, "move", dataSource, interval),
         dataSource,
         interval,
         context
@@ -72,13 +73,13 @@ public class MoveTask extends AbstractFixedIntervalTask
   public TaskStatus run(TaskToolbox toolbox) throws Exception
   {
     // Confirm we have a lock (will throw if there isn't exactly one element)
-    final TaskLock myLock = Iterables.getOnlyElement(getTaskLocks(toolbox));
+    final TaskLock myLock = Iterables.getOnlyElement(getTaskLocks(toolbox.getTaskActionClient()));
 
-    if(!myLock.getDataSource().equals(getDataSource())) {
+    if (!myLock.getDataSource().equals(getDataSource())) {
       throw new ISE("WTF?! Lock dataSource[%s] != task dataSource[%s]", myLock.getDataSource(), getDataSource());
     }
 
-    if(!myLock.getInterval().equals(getInterval())) {
+    if (!myLock.getInterval().equals(getInterval())) {
       throw new ISE("WTF?! Lock interval[%s] != task interval[%s]", myLock.getInterval(), getInterval());
     }
 
@@ -88,8 +89,8 @@ public class MoveTask extends AbstractFixedIntervalTask
         .submit(new SegmentListUnusedAction(myLock.getDataSource(), myLock.getInterval()));
 
     // Verify none of these segments have versions > lock version
-    for(final DataSegment unusedSegment : unusedSegments) {
-      if(unusedSegment.getVersion().compareTo(myLock.getVersion()) > 0) {
+    for (final DataSegment unusedSegment : unusedSegments) {
+      if (unusedSegment.getVersion().compareTo(myLock.getVersion()) > 0) {
         throw new ISE(
             "WTF?! Unused segment[%s] has version[%s] > task version[%s]",
             unusedSegment.getIdentifier(),

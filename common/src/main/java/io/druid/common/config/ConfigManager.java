@@ -21,12 +21,11 @@ package io.druid.common.config;
 
 import com.google.common.base.Supplier;
 import com.google.common.base.Throwables;
-import com.google.common.collect.Maps;
 import com.google.inject.Inject;
-import com.metamx.common.concurrent.ScheduledExecutors;
-import com.metamx.common.lifecycle.LifecycleStart;
-import com.metamx.common.lifecycle.LifecycleStop;
-import com.metamx.common.logger.Logger;
+import io.druid.java.util.common.concurrent.ScheduledExecutors;
+import io.druid.java.util.common.lifecycle.LifecycleStart;
+import io.druid.java.util.common.lifecycle.LifecycleStop;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.metadata.MetadataStorageConnector;
 import io.druid.metadata.MetadataStorageTablesConfig;
 import org.joda.time.Duration;
@@ -34,6 +33,7 @@ import org.joda.time.Duration;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -64,7 +64,7 @@ public class ConfigManager
     this.config = config;
 
     this.exec = ScheduledExecutors.fixed(1, "config-manager-%s");
-    this.watchedConfigs = Maps.newConcurrentMap();
+    this.watchedConfigs = new ConcurrentHashMap<>();
 
     this.configTable = dbTables.get().getConfigTable();
   }

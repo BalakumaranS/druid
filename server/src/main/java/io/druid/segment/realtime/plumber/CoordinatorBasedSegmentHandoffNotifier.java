@@ -1,39 +1,38 @@
 /*
-* Licensed to Metamarkets Group Inc. (Metamarkets) under one
-* or more contributor license agreements. See the NOTICE file
-* distributed with this work for additional information
-* regarding copyright ownership. Metamarkets licenses this file
-* to you under the Apache License, Version 2.0 (the
-* "License"); you may not use this file except in compliance
-* with the License. You may obtain a copy of the License at
-*
-* http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing,
-* software distributed under the License is distributed on an
-* "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-* KIND, either express or implied. See the License for the
-* specific language governing permissions and limitations
-* under the License.
-*/
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 
 package io.druid.segment.realtime.plumber;
 
 import com.google.common.base.Predicate;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Maps;
-import com.metamx.common.Pair;
-import com.metamx.common.logger.Logger;
 import io.druid.client.ImmutableSegmentLoadInfo;
-import io.druid.client.SegmentLoadInfo;
 import io.druid.client.coordinator.CoordinatorClient;
-import io.druid.concurrent.Execs;
+import io.druid.java.util.common.concurrent.Execs;
+import io.druid.java.util.common.Pair;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.query.SegmentDescriptor;
 import io.druid.server.coordination.DruidServerMetadata;
 
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
@@ -43,7 +42,7 @@ public class CoordinatorBasedSegmentHandoffNotifier implements SegmentHandoffNot
 {
   private static final Logger log = new Logger(CoordinatorBasedSegmentHandoffNotifier.class);
 
-  private final ConcurrentMap<SegmentDescriptor, Pair<Executor, Runnable>> handOffCallbacks = Maps.newConcurrentMap();
+  private final ConcurrentMap<SegmentDescriptor, Pair<Executor, Runnable>> handOffCallbacks = new ConcurrentHashMap<>();
   private final CoordinatorClient coordinatorClient;
   private volatile ScheduledExecutorService scheduledExecutor;
   private final long pollDurationMillis;
@@ -127,7 +126,7 @@ public class CoordinatorBasedSegmentHandoffNotifier implements SegmentHandoffNot
     catch (Throwable t) {
       log.error(
           t,
-          "Exception while checking handoff for dataSource[%s] Segment[%s], Will try again after [%d]secs",
+          "Exception while checking handoff for dataSource[%s], Will try again after [%d]secs",
           dataSource,
           pollDurationMillis
       );
@@ -148,7 +147,7 @@ public class CoordinatorBasedSegmentHandoffNotifier implements SegmentHandoffNot
             @Override
             public boolean apply(DruidServerMetadata input)
             {
-              return input.isAssignable();
+              return input.segmentReplicatable();
             }
           }
       )) {
@@ -159,7 +158,7 @@ public class CoordinatorBasedSegmentHandoffNotifier implements SegmentHandoffNot
   }
 
   @Override
-  public void stop()
+  public void close()
   {
     scheduledExecutor.shutdown();
   }

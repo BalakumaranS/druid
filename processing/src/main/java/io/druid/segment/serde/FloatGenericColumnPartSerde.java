@@ -27,10 +27,8 @@ import io.druid.segment.column.ColumnConfig;
 import io.druid.segment.column.ValueType;
 import io.druid.segment.data.CompressedFloatsIndexedSupplier;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.nio.channels.WritableByteChannel;
 
 /**
  */
@@ -45,7 +43,7 @@ public class FloatGenericColumnPartSerde implements ColumnPartSerde
   }
 
   private final ByteOrder byteOrder;
-  private Serializer serializer;
+  private final Serializer serializer;
 
   private FloatGenericColumnPartSerde(ByteOrder byteOrder, Serializer serializer)
   {
@@ -83,65 +81,7 @@ public class FloatGenericColumnPartSerde implements ColumnPartSerde
 
     public FloatGenericColumnPartSerde build()
     {
-      return new FloatGenericColumnPartSerde(
-          byteOrder, new Serializer()
-      {
-        @Override
-        public long numBytes()
-        {
-          return delegate.getSerializedSize();
-        }
-
-        @Override
-        public void write(WritableByteChannel channel) throws IOException
-        {
-          delegate.writeToChannel(channel);
-        }
-      }
-      );
-    }
-  }
-
-  public static LegacySerializerBuilder legacySerializerBuilder()
-  {
-    return new LegacySerializerBuilder();
-  }
-
-  public static class LegacySerializerBuilder
-  {
-    private ByteOrder byteOrder = null;
-    private CompressedFloatsIndexedSupplier delegate = null;
-
-    public LegacySerializerBuilder withByteOrder(final ByteOrder byteOrder)
-    {
-      this.byteOrder = byteOrder;
-      return this;
-    }
-
-    public LegacySerializerBuilder withDelegate(final CompressedFloatsIndexedSupplier delegate)
-    {
-      this.delegate = delegate;
-      return this;
-    }
-
-    public FloatGenericColumnPartSerde build()
-    {
-      return new FloatGenericColumnPartSerde(
-          byteOrder, new Serializer()
-      {
-        @Override
-        public long numBytes()
-        {
-          return delegate.getSerializedSize();
-        }
-
-        @Override
-        public void write(WritableByteChannel channel) throws IOException
-        {
-          delegate.writeToChannel(channel);
-        }
-      }
-      );
+      return new FloatGenericColumnPartSerde(byteOrder, delegate);
     }
   }
 
@@ -165,7 +105,7 @@ public class FloatGenericColumnPartSerde implements ColumnPartSerde
         );
         builder.setType(ValueType.FLOAT)
                .setHasMultipleValues(false)
-               .setGenericColumn(new FloatGenericColumnSupplier(column, byteOrder));
+               .setGenericColumn(new FloatGenericColumnSupplier(column));
       }
     };
   }

@@ -19,68 +19,36 @@
 
 package io.druid.segment.filter;
 
-import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
-import com.metamx.collections.bitmap.ImmutableBitmap;
-import com.metamx.common.guava.FunctionalIterable;
+import io.druid.query.BitmapResultFactory;
 import io.druid.query.filter.BitmapIndexSelector;
 import io.druid.query.filter.Filter;
+import io.druid.query.filter.JavaScriptDimFilter;
 import io.druid.query.filter.ValueMatcher;
-import io.druid.query.filter.ValueMatcherFactory;
+import io.druid.segment.ColumnSelector;
 import io.druid.segment.ColumnSelectorFactory;
-import io.druid.segment.data.Indexed;
 import org.mozilla.javascript.Context;
-import org.mozilla.javascript.Function;
-import org.mozilla.javascript.ScriptableObject;
-
-import javax.annotation.Nullable;
 
 public class JavaScriptFilter implements Filter
 {
-  private final JavaScriptPredicate predicate;
   private final String dimension;
+  private final JavaScriptDimFilter.JavaScriptPredicateFactory predicateFactory;
 
-  public JavaScriptFilter(String dimension, final String script)
+  public JavaScriptFilter(
+      String dimension,
+      JavaScriptDimFilter.JavaScriptPredicateFactory predicate
+  )
   {
     this.dimension = dimension;
-    this.predicate = new JavaScriptPredicate(script);
+    this.predicateFactory = predicate;
   }
 
   @Override
-  public ImmutableBitmap getBitmapIndex(final BitmapIndexSelector selector)
+  public <T> T getBitmapResult(BitmapIndexSelector selector, BitmapResultFactory<T> bitmapResultFactory)
   {
     final Context cx = Context.enter();
     try {
-      final Indexed<String> dimValues = selector.getDimensionValues(dimension);
-      ImmutableBitmap bitmap;
-      if (dimValues == null) {
-        bitmap = selector.getBitmapFactory().makeEmptyImmutableBitmap();
-      } else {
-        bitmap = selector.getBitmapFactory().union(
-            FunctionalIterable.create(dimValues)
-                              .filter(
-                                  new Predicate<String>()
-                                  {
-                                    @Override
-                                    public boolean apply(@Nullable String input)
-                                    {
-                                      return predicate.applyInContext(cx, input);
-                                    }
-                                  }
-                              )
-                              .transform(
-                                  new com.google.common.base.Function<String, ImmutableBitmap>()
-                                  {
-                                    @Override
-                                    public ImmutableBitmap apply(@Nullable String input)
-                                    {
-                                      return selector.getBitmapIndex(dimension, input);
-                                    }
-                                  }
-                              )
-        );
-      }
-      return bitmap;
+      return Filters.matchPredicate(dimension, selector, bitmapResultFactory, makeStringPredicate(cx));
     }
     finally {
       Context.exit();
@@ -88,84 +56,47 @@ public class JavaScriptFilter implements Filter
   }
 
   @Override
-  public ValueMatcher makeMatcher(ValueMatcherFactory factory)
+  public double estimateSelectivity(BitmapIndexSelector indexSelector)
   {
-    // suboptimal, since we need create one context per call to predicate.apply()
-    return factory.makeValueMatcher(dimension, predicate);
+    final Context cx = Context.enter();
+    try {
+      return Filters.estimateSelectivity(dimension, indexSelector, makeStringPredicate(cx));
+    }
+    finally {
+      Context.exit();
+    }
   }
 
-  static class JavaScriptPredicate implements Predicate<String>
+  private Predicate<String> makeStringPredicate(final Context context)
   {
-    final ScriptableObject scope;
-    final Function fnApply;
-    final String script;
-
-    public JavaScriptPredicate(final String script)
+    return new Predicate<String>()
     {
-      Preconditions.checkNotNull(script, "script must not be null");
-      this.script = script;
-
-      final Context cx = Context.enter();
-      try {
-        cx.setOptimizationLevel(9);
-        scope = cx.initStandardObjects();
-
-        fnApply = cx.compileFunction(scope, script, "script", 1, null);
+      @Override
+      public boolean apply(String input)
+      {
+        return predicateFactory.applyInContext(context, input);
       }
-      finally {
-        Context.exit();
-      }
-    }
-
-    @Override
-    public boolean apply(final String input)
-    {
-      // one and only one context per thread
-      final Context cx = Context.enter();
-      try {
-        return applyInContext(cx, input);
-      }
-      finally {
-        Context.exit();
-      }
-
-    }
-
-    public boolean applyInContext(Context cx, String input)
-    {
-      return Context.toBoolean(fnApply.call(cx, scope, scope, new String[]{input}));
-    }
-
-    @Override
-    public boolean equals(Object o)
-    {
-      if (this == o) {
-        return true;
-      }
-      if (o == null || getClass() != o.getClass()) {
-        return false;
-      }
-
-      JavaScriptPredicate that = (JavaScriptPredicate) o;
-
-      if (!script.equals(that.script)) {
-        return false;
-      }
-
-      return true;
-    }
-
-    @Override
-    public int hashCode()
-    {
-      return script.hashCode();
-    }
+    };
   }
 
   @Override
   public ValueMatcher makeMatcher(ColumnSelectorFactory factory)
   {
-    throw new UnsupportedOperationException();
+    // suboptimal, since we need create one context per call to predicate.apply()
+    return Filters.makeValueMatcher(factory, dimension, predicateFactory);
   }
 
+  @Override
+  public boolean supportsBitmapIndex(BitmapIndexSelector selector)
+  {
+    return selector.getBitmapIndex(dimension) != null;
+  }
+
+  @Override
+  public boolean supportsSelectivityEstimation(
+      ColumnSelector columnSelector, BitmapIndexSelector indexSelector
+  )
+  {
+    return Filters.supportsSelectivityEstimation(this, dimension, columnSelector, indexSelector);
+  }
 }

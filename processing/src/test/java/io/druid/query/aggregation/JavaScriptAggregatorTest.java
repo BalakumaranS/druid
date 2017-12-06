@@ -19,11 +19,19 @@
 
 package io.druid.query.aggregation;
 
-import com.google.common.collect.Lists;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Maps;
-import io.druid.segment.ObjectColumnSelector;
+import io.druid.java.util.common.StringUtils;
+import io.druid.js.JavaScriptConfig;
+import io.druid.query.dimension.DimensionSpec;
+import io.druid.segment.ColumnSelectorFactory;
+import io.druid.segment.ColumnValueSelector;
+import io.druid.segment.DimensionSelector;
+import io.druid.segment.column.ColumnCapabilities;
 import org.junit.Assert;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.ExpectedException;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
@@ -35,6 +43,27 @@ public class JavaScriptAggregatorTest
   protected static final Map<String, String> sumLogATimesBPlusTen = Maps.newHashMap();
   protected static final Map<String, String> scriptDoubleSum = Maps.newHashMap();
 
+  final ColumnSelectorFactory DUMMY_COLUMN_SELECTOR_FACTORY = new ColumnSelectorFactory()
+  {
+    @Override
+    public DimensionSelector makeDimensionSelector(DimensionSpec dimensionSpec)
+    {
+      return null;
+    }
+
+    @Override
+    public ColumnValueSelector<?> makeColumnValueSelector(String columnName)
+    {
+      return null;
+    }
+
+    @Override
+    public ColumnCapabilities getColumnCapabilities(String columnName)
+    {
+      return null;
+    }
+  };
+
   static {
     sumLogATimesBPlusTen.put("fnAggregate", "function aggregate(current, a, b) { return current + (Math.log(a) * b) }");
     sumLogATimesBPlusTen.put("fnReset", "function reset()                  { return 10 }");
@@ -45,24 +74,29 @@ public class JavaScriptAggregatorTest
     scriptDoubleSum.put("fnCombine", "function combine(a,b)          { return a + b }");
   }
 
-  private static void aggregate(TestFloatColumnSelector selector1, TestFloatColumnSelector selector2, Aggregator agg)
+  @Rule
+  public final ExpectedException expectedException = ExpectedException.none();
+
+  private static void aggregate(TestDoubleColumnSelectorImpl selector1, TestDoubleColumnSelectorImpl selector2, Aggregator agg)
   {
     agg.aggregate();
     selector1.increment();
     selector2.increment();
   }
 
-  private void aggregateBuffer(TestFloatColumnSelector selector1,
-                               TestFloatColumnSelector selector2,
-                               BufferAggregator agg,
-                               ByteBuffer buf, int position)
+  private void aggregateBuffer(
+      TestFloatColumnSelector selector1,
+      TestFloatColumnSelector selector2,
+      BufferAggregator agg,
+      ByteBuffer buf, int position
+  )
   {
     agg.aggregate(buf, position);
     selector1.increment();
     selector2.increment();
   }
 
-  private static void aggregate(TestFloatColumnSelector selector, Aggregator agg)
+  private static void aggregate(TestDoubleColumnSelectorImpl selector, Aggregator agg)
   {
     agg.aggregate();
     selector.increment();
@@ -77,22 +111,21 @@ public class JavaScriptAggregatorTest
   @Test
   public void testAggregate()
   {
-    final TestFloatColumnSelector selector1 = new TestFloatColumnSelector(new float[]{42.12f, 9f});
-    final TestFloatColumnSelector selector2 = new TestFloatColumnSelector(new float[]{2f, 3f});
+    final TestDoubleColumnSelectorImpl selector1 = new TestDoubleColumnSelectorImpl(new double[]{42.12d, 9d});
+    final TestDoubleColumnSelectorImpl selector2 = new TestDoubleColumnSelectorImpl(new double[]{2d, 3d});
 
     Map<String, String> script = sumLogATimesBPlusTen;
 
     JavaScriptAggregator agg = new JavaScriptAggregator(
-      "billy",
-      Arrays.<ObjectColumnSelector>asList(MetricSelectorUtils.wrap(selector1), MetricSelectorUtils.wrap(selector2)),
-      JavaScriptAggregatorFactory.compileScript(script.get("fnAggregate"),
-                                                script.get("fnReset"),
-                                                script.get("fnCombine"))
+        Arrays.asList(selector1, selector2),
+        JavaScriptAggregatorFactory.compileScript(
+            script.get("fnAggregate"),
+            script.get("fnReset"),
+            script.get("fnCombine")
+        )
     );
 
     agg.reset();
-
-    Assert.assertEquals("billy", agg.getName());
 
     double val = 10.;
     Assert.assertEquals(val, agg.get());
@@ -100,13 +133,13 @@ public class JavaScriptAggregatorTest
     Assert.assertEquals(val, agg.get());
     aggregate(selector1, selector2, agg);
 
-    val += Math.log(42.12f) * 2f;
+    val += Math.log(42.12d) * 2d;
     Assert.assertEquals(val, agg.get());
     Assert.assertEquals(val, agg.get());
     Assert.assertEquals(val, agg.get());
 
     aggregate(selector1, selector2, agg);
-    val += Math.log(9f) * 3f;
+    val += Math.log(9d) * 3d;
     Assert.assertEquals(val, agg.get());
     Assert.assertEquals(val, agg.get());
     Assert.assertEquals(val, agg.get());
@@ -120,10 +153,12 @@ public class JavaScriptAggregatorTest
 
     Map<String, String> script = sumLogATimesBPlusTen;
     JavaScriptBufferAggregator agg = new JavaScriptBufferAggregator(
-      Arrays.<ObjectColumnSelector>asList(MetricSelectorUtils.wrap(selector1), MetricSelectorUtils.wrap(selector2)),
-      JavaScriptAggregatorFactory.compileScript(script.get("fnAggregate"),
-                                                script.get("fnReset"),
-                                                script.get("fnCombine"))
+        Arrays.asList(selector1, selector2),
+        JavaScriptAggregatorFactory.compileScript(
+            script.get("fnAggregate"),
+            script.get("fnReset"),
+            script.get("fnCombine")
+        )
     );
 
     ByteBuffer buf = ByteBuffer.allocateDirect(32);
@@ -154,16 +189,15 @@ public class JavaScriptAggregatorTest
     Map<String, String> script = scriptDoubleSum;
 
     JavaScriptAggregator agg = new JavaScriptAggregator(
-        "billy",
-        Collections.<ObjectColumnSelector>singletonList(null),
-        JavaScriptAggregatorFactory.compileScript(script.get("fnAggregate"),
-                                                  script.get("fnReset"),
-                                                  script.get("fnCombine"))
+        Collections.singletonList(null),
+        JavaScriptAggregatorFactory.compileScript(
+            script.get("fnAggregate"),
+            script.get("fnReset"),
+            script.get("fnCombine")
+        )
     );
 
     final double val = 0;
-
-    Assert.assertEquals("billy", agg.getName());
 
     agg.reset();
     Assert.assertEquals(val, agg.get());
@@ -184,10 +218,11 @@ public class JavaScriptAggregatorTest
   @Test
   public void testAggregateStrings()
   {
-    final TestObjectColumnSelector ocs = new TestObjectColumnSelector("what", null, new String[]{"hey", "there"});
+    final TestObjectColumnSelector ocs = new TestObjectColumnSelector<>(
+        new Object[]{"what", null, new String[]{"hey", "there"}}
+    );
     final JavaScriptAggregator agg = new JavaScriptAggregator(
-        "billy",
-        Collections.<ObjectColumnSelector>singletonList(ocs),
+        Collections.singletonList(ocs),
         JavaScriptAggregatorFactory.compileScript(
             "function aggregate(current, a) { if (Array.isArray(a)) { return current + a.length; } else if (typeof a === 'string') { return current + 1; } else { return current; } }",
             scriptDoubleSum.get("fnReset"),
@@ -196,8 +231,6 @@ public class JavaScriptAggregatorTest
     );
 
     agg.reset();
-
-    Assert.assertEquals("billy", agg.getName());
 
     double val = 0.;
     Assert.assertEquals(val, agg.get());
@@ -222,13 +255,51 @@ public class JavaScriptAggregatorTest
     Assert.assertEquals(val, agg.get());
   }
 
-  public static void main(String... args) throws Exception {
-    final JavaScriptAggregatorBenchmark.LoopingFloatColumnSelector selector = new JavaScriptAggregatorBenchmark.LoopingFloatColumnSelector(new float[]{42.12f, 9f});
+  @Test
+  public void testJavaScriptDisabledFactorize()
+  {
+    final JavaScriptAggregatorFactory factory = new JavaScriptAggregatorFactory(
+        "foo",
+        ImmutableList.of("foo"),
+        scriptDoubleSum.get("fnAggregate"),
+        scriptDoubleSum.get("fnReset"),
+        scriptDoubleSum.get("fnCombine"),
+        new JavaScriptConfig(false)
+    );
+
+    expectedException.expect(IllegalStateException.class);
+    expectedException.expectMessage("JavaScript is disabled");
+    factory.factorize(DUMMY_COLUMN_SELECTOR_FACTORY);
+    Assert.assertTrue(false);
+  }
+
+  @Test
+  public void testJavaScriptDisabledFactorizeBuffered()
+  {
+    final JavaScriptAggregatorFactory factory = new JavaScriptAggregatorFactory(
+        "foo",
+        ImmutableList.of("foo"),
+        scriptDoubleSum.get("fnAggregate"),
+        scriptDoubleSum.get("fnReset"),
+        scriptDoubleSum.get("fnCombine"),
+        new JavaScriptConfig(false)
+    );
+
+    expectedException.expect(IllegalStateException.class);
+    expectedException.expectMessage("JavaScript is disabled");
+    factory.factorizeBuffered(DUMMY_COLUMN_SELECTOR_FACTORY);
+    Assert.assertTrue(false);
+  }
+
+  public static void main(String... args) throws Exception
+  {
+    final JavaScriptAggregatorBenchmark.LoopingDoubleColumnSelector selector = new JavaScriptAggregatorBenchmark.LoopingDoubleColumnSelector(
+        new double[]{42.12d, 9d});
 
     /* memory usage test
     List<JavaScriptAggregator> aggs = Lists.newLinkedList();
 
-    for(int i = 0; i < 100000; ++i) {
+    for (int i = 0; i < 100000; ++i) {
         JavaScriptAggregator a = new JavaScriptAggregator(
           "billy",
           Lists.asList(selector, new FloatColumnSelector[]{}),
@@ -238,52 +309,53 @@ public class JavaScriptAggregatorTest
         a.aggregate();
         a.aggregate();
         a.aggregate();
-        if(i % 1000 == 0) System.out.println(String.format("Query object %d", i));
+        if (i % 1000 == 0) System.out.println(StringUtils.format("Query object %d", i));
     }
     */
 
     Map<String, String> script = scriptDoubleSum;
     JavaScriptAggregator aggRhino = new JavaScriptAggregator(
-      "billy",
-      Lists.asList(MetricSelectorUtils.wrap(selector), new ObjectColumnSelector[]{}),
-      JavaScriptAggregatorFactory.compileScript(script.get("fnAggregate"),
-                                                script.get("fnReset"),
-                                                script.get("fnCombine"))
+        Collections.singletonList(selector),
+        JavaScriptAggregatorFactory.compileScript(
+            script.get("fnAggregate"),
+            script.get("fnReset"),
+            script.get("fnCombine")
+        )
     );
 
-    DoubleSumAggregator doubleAgg = new DoubleSumAggregator("billy", selector);
+    DoubleSumAggregator doubleAgg = new DoubleSumAggregator(selector);
 
     // warmup
     int i = 0;
     long t = 0;
-    while(i < 10000) {
+    while (i < 10000) {
       aggregate(selector, aggRhino);
       ++i;
     }
     i = 0;
-    while(i < 10000) {
+    while (i < 10000) {
       aggregate(selector, doubleAgg);
       ++i;
     }
 
     t = System.currentTimeMillis();
     i = 0;
-    while(i < 500000000) {
+    while (i < 500000000) {
       aggregate(selector, aggRhino);
       ++i;
     }
     long t1 = System.currentTimeMillis() - t;
-    System.out.println(String.format("JavaScript aggregator == %,f: %d ms", aggRhino.get(), t1));
+    System.out.println(StringUtils.format("JavaScript aggregator == %,f: %d ms", aggRhino.getFloat(), t1));
 
     t = System.currentTimeMillis();
     i = 0;
-    while(i < 500000000) {
+    while (i < 500000000) {
       aggregate(selector, doubleAgg);
       ++i;
     }
     long t2 = System.currentTimeMillis() - t;
-    System.out.println(String.format("DoubleSum  aggregator == %,f: %d ms", doubleAgg.get(), t2));
+    System.out.println(StringUtils.format("DoubleSum  aggregator == %,f: %d ms", doubleAgg.getFloat(), t2));
 
-    System.out.println(String.format("JavaScript is %2.1fx slower", (double)t1 / t2));
+    System.out.println(StringUtils.format("JavaScript is %2.1fx slower", (double) t1 / t2));
   }
 }

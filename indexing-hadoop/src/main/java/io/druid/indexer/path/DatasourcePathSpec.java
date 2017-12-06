@@ -28,12 +28,12 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
-import com.metamx.common.ISE;
-import com.metamx.common.logger.Logger;
 import io.druid.indexer.HadoopDruidIndexerConfig;
 import io.druid.indexer.hadoop.DatasourceIngestionSpec;
 import io.druid.indexer.hadoop.DatasourceInputFormat;
 import io.druid.indexer.hadoop.WindowedDataSegment;
+import io.druid.java.util.common.ISE;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.query.aggregation.AggregatorFactory;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapreduce.Job;
@@ -114,7 +114,7 @@ public class DatasourcePathSpec implements PathSpec
     if (updatedIngestionSpec.getDimensions() == null) {
       List<String> dims;
       if (config.getParser().getParseSpec().getDimensionsSpec().hasCustomDimensions()) {
-        dims = config.getParser().getParseSpec().getDimensionsSpec().getDimensions();
+        dims = config.getParser().getParseSpec().getDimensionsSpec().getDimensionNames();
       } else {
         Set<String> dimSet = Sets.newHashSet(
             Iterables.concat(
@@ -156,6 +156,11 @@ public class DatasourcePathSpec implements PathSpec
     }
 
     updatedIngestionSpec = updatedIngestionSpec.withQueryGranularity(config.getGranularitySpec().getQueryGranularity());
+
+    // propagate in the transformSpec from the overall job config
+    updatedIngestionSpec = updatedIngestionSpec.withTransformSpec(
+        config.getSchema().getDataSchema().getTransformSpec()
+    );
 
     job.getConfiguration().set(DatasourceInputFormat.CONF_DRUID_SCHEMA, mapper.writeValueAsString(updatedIngestionSpec));
     job.getConfiguration().set(DatasourceInputFormat.CONF_INPUT_SEGMENTS, mapper.writeValueAsString(segments));

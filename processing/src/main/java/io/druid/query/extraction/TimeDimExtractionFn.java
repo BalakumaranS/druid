@@ -22,9 +22,11 @@ package io.druid.query.extraction;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
 import com.ibm.icu.text.SimpleDateFormat;
-import com.metamx.common.StringUtils;
+import io.druid.java.util.common.StringUtils;
 
+import javax.annotation.Nullable;
 import java.nio.ByteBuffer;
 import java.text.ParseException;
 import java.util.Date;
@@ -34,9 +36,9 @@ import java.util.Date;
 public class TimeDimExtractionFn extends DimExtractionFn
 {
   private final String timeFormat;
-  private final SimpleDateFormat timeFormatter;
+  private final ThreadLocal<SimpleDateFormat> timeFormatter;
   private final String resultFormat;
-  private final SimpleDateFormat resultFormatter;
+  private final ThreadLocal<SimpleDateFormat> resultFormatter;
 
   @JsonCreator
   public TimeDimExtractionFn(
@@ -48,11 +50,17 @@ public class TimeDimExtractionFn extends DimExtractionFn
     Preconditions.checkNotNull(resultFormat, "resultFormat must not be null");
 
     this.timeFormat = timeFormat;
-    this.timeFormatter = new SimpleDateFormat(timeFormat);
-    this.timeFormatter.setLenient(true);
+    this.timeFormatter = ThreadLocal.withInitial(() -> {
+      SimpleDateFormat formatter = new SimpleDateFormat(TimeDimExtractionFn.this.timeFormat);
+      formatter.setLenient(true);
+      return formatter;
+    });
 
     this.resultFormat = resultFormat;
-    this.resultFormatter = new SimpleDateFormat(resultFormat);
+    this.resultFormatter = ThreadLocal.withInitial(() -> {
+      SimpleDateFormat formatter = new SimpleDateFormat(TimeDimExtractionFn.this.resultFormat);
+      return formatter;
+    });
   }
 
   @Override
@@ -65,17 +73,22 @@ public class TimeDimExtractionFn extends DimExtractionFn
                      .array();
   }
 
+  @Nullable
   @Override
-  public String apply(String dimValue)
+  public String apply(@Nullable String dimValue)
   {
+    if (Strings.isNullOrEmpty(dimValue)) {
+      return null;
+    }
+
     Date date;
     try {
-      date = timeFormatter.parse(dimValue);
+      date = timeFormatter.get().parse(dimValue);
     }
     catch (ParseException e) {
       return dimValue;
     }
-    return resultFormatter.format(date);
+    return resultFormatter.get().format(date);
   }
 
   @JsonProperty("timeFormat")

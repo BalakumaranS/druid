@@ -24,19 +24,11 @@ import io.druid.data.input.Row;
 /**
  * A "having" spec that always evaluates to false
  */
-public class NeverHavingSpec implements HavingSpec
+public class NeverHavingSpec extends BaseHavingSpec
 {
-  private static final byte CACHE_KEY = 0x1;
-
   @Override
   public boolean eval(Row row)
   {
     return false;
-  }
-
-  @Override
-  public byte[] getCacheKey()
-  {
-    return new byte[]{CACHE_KEY};
   }
 }

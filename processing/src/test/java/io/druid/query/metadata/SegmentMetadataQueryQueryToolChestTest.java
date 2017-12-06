@@ -25,6 +25,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
 import io.druid.jackson.DefaultObjectMapper;
+import io.druid.java.util.common.Intervals;
 import io.druid.query.CacheStrategy;
 import io.druid.query.TableDataSource;
 import io.druid.query.aggregation.AggregatorFactory;
@@ -35,9 +36,8 @@ import io.druid.query.aggregation.LongSumAggregatorFactory;
 import io.druid.query.metadata.metadata.ColumnAnalysis;
 import io.druid.query.metadata.metadata.SegmentAnalysis;
 import io.druid.query.metadata.metadata.SegmentMetadataQuery;
-import io.druid.query.spec.QuerySegmentSpecs;
+import io.druid.query.spec.LegacySegmentSpec;
 import io.druid.segment.column.ValueType;
-import org.joda.time.Interval;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -50,7 +50,7 @@ public class SegmentMetadataQueryQueryToolChestTest
   {
     SegmentMetadataQuery query = new SegmentMetadataQuery(
         new TableDataSource("dummy"),
-        QuerySegmentSpecs.create("2015-01-01/2015-01-02"),
+        new LegacySegmentSpec("2015-01-01/2015-01-02"),
         null,
         null,
         null,
@@ -60,18 +60,16 @@ public class SegmentMetadataQueryQueryToolChestTest
     );
 
     CacheStrategy<SegmentAnalysis, SegmentAnalysis, SegmentMetadataQuery> strategy =
-        new SegmentMetadataQueryQueryToolChest(null).getCacheStrategy(query);
+        new SegmentMetadataQueryQueryToolChest(new SegmentMetadataQueryConfig()).getCacheStrategy(query);
 
     // Test cache key generation
-    byte[] expectedKey = {0x04, 0x01, (byte) 0xFF, 0x00, 0x01, 0x02, 0x04};
+    byte[] expectedKey = {0x04, 0x01, (byte) 0xFF, 0x00, 0x02, 0x04};
     byte[] actualKey = strategy.computeCacheKey(query);
     Assert.assertArrayEquals(expectedKey, actualKey);
 
     SegmentAnalysis result = new SegmentAnalysis(
         "testSegment",
-        ImmutableList.of(
-            new Interval("2011-01-12T00:00:00.000Z/2011-04-15T00:00:00.001Z")
-        ),
+        ImmutableList.of(Intervals.of("2011-01-12T00:00:00.000Z/2011-04-15T00:00:00.001Z")),
         ImmutableMap.of(
             "placement",
             new ColumnAnalysis(
@@ -85,6 +83,9 @@ public class SegmentMetadataQueryQueryToolChestTest
             )
         ), 71982,
         100,
+        null,
+        null,
+        null,
         null
     );
 
@@ -113,7 +114,10 @@ public class SegmentMetadataQueryQueryToolChestTest
         ImmutableMap.of(
             "foo", new LongSumAggregatorFactory("foo", "foo"),
             "baz", new DoubleSumAggregatorFactory("baz", "baz")
-        )
+        ),
+        null,
+        null,
+        null
     );
     final SegmentAnalysis analysis2 = new SegmentAnalysis(
         "id",
@@ -124,7 +128,10 @@ public class SegmentMetadataQueryQueryToolChestTest
         ImmutableMap.of(
             "foo", new LongSumAggregatorFactory("foo", "foo"),
             "bar", new DoubleSumAggregatorFactory("bar", "bar")
-        )
+        ),
+        null,
+        null,
+        null
     );
 
     Assert.assertEquals(
@@ -154,6 +161,9 @@ public class SegmentMetadataQueryQueryToolChestTest
         Maps.<String, ColumnAnalysis>newHashMap(),
         0,
         0,
+        null,
+        null,
+        null,
         null
     );
     final SegmentAnalysis analysis2 = new SegmentAnalysis(
@@ -165,7 +175,10 @@ public class SegmentMetadataQueryQueryToolChestTest
         ImmutableMap.of(
             "foo", new LongSumAggregatorFactory("foo", "foo"),
             "bar", new DoubleSumAggregatorFactory("bar", "bar")
-        )
+        ),
+        null,
+        null,
+        null
     );
 
     Assert.assertNull(mergeStrict(analysis1, analysis2).getAggregators());
@@ -187,6 +200,9 @@ public class SegmentMetadataQueryQueryToolChestTest
         Maps.<String, ColumnAnalysis>newHashMap(),
         0,
         0,
+        null,
+        null,
+        null,
         null
     );
     final SegmentAnalysis analysis2 = new SegmentAnalysis(
@@ -195,6 +211,9 @@ public class SegmentMetadataQueryQueryToolChestTest
         Maps.<String, ColumnAnalysis>newHashMap(),
         0,
         0,
+        null,
+        null,
+        null,
         null
     );
 
@@ -214,7 +233,10 @@ public class SegmentMetadataQueryQueryToolChestTest
         ImmutableMap.of(
             "foo", new LongSumAggregatorFactory("foo", "foo"),
             "bar", new DoubleSumAggregatorFactory("bar", "bar")
-        )
+        ),
+        null,
+        null,
+        null
     );
     final SegmentAnalysis analysis2 = new SegmentAnalysis(
         "id",
@@ -226,7 +248,10 @@ public class SegmentMetadataQueryQueryToolChestTest
             "foo", new LongSumAggregatorFactory("foo", "foo"),
             "bar", new DoubleMaxAggregatorFactory("bar", "bar"),
             "baz", new LongMaxAggregatorFactory("baz", "baz")
-        )
+        ),
+        null,
+        null,
+        null
     );
 
     final Map<String, AggregatorFactory> expectedLenient = Maps.newHashMap();
@@ -235,6 +260,82 @@ public class SegmentMetadataQueryQueryToolChestTest
     expectedLenient.put("baz", new LongMaxAggregatorFactory("baz", "baz"));
     Assert.assertNull(mergeStrict(analysis1, analysis2).getAggregators());
     Assert.assertEquals(expectedLenient, mergeLenient(analysis1, analysis2).getAggregators());
+
+    // Simulate multi-level merge
+    Assert.assertEquals(
+        expectedLenient,
+        mergeLenient(
+            mergeLenient(analysis1, analysis2),
+            mergeLenient(analysis1, analysis2)
+        ).getAggregators()
+    );
+  }
+
+  @SuppressWarnings("ArgumentParameterSwap")
+  @Test
+  public void testMergeRollup()
+  {
+    final SegmentAnalysis analysis1 = new SegmentAnalysis(
+        "id",
+        null,
+        Maps.<String, ColumnAnalysis>newHashMap(),
+        0,
+        0,
+        null,
+        null,
+        null,
+        null
+    );
+    final SegmentAnalysis analysis2 = new SegmentAnalysis(
+        "id",
+        null,
+        Maps.<String, ColumnAnalysis>newHashMap(),
+        0,
+        0,
+        null,
+        null,
+        null,
+        false
+    );
+    final SegmentAnalysis analysis3 = new SegmentAnalysis(
+        "id",
+        null,
+        Maps.<String, ColumnAnalysis>newHashMap(),
+        0,
+        0,
+        null,
+        null,
+        null,
+        false
+    );
+    final SegmentAnalysis analysis4 = new SegmentAnalysis(
+        "id",
+        null,
+        Maps.<String, ColumnAnalysis>newHashMap(),
+        0,
+        0,
+        null,
+        null,
+        null,
+        true
+    );
+    final SegmentAnalysis analysis5 = new SegmentAnalysis(
+        "id",
+        null,
+        Maps.<String, ColumnAnalysis>newHashMap(),
+        0,
+        0,
+        null,
+        null,
+        null,
+        true
+    );
+
+    Assert.assertNull(mergeStrict(analysis1, analysis2).isRollup());
+    Assert.assertNull(mergeStrict(analysis1, analysis4).isRollup());
+    Assert.assertNull(mergeStrict(analysis2, analysis4).isRollup());
+    Assert.assertFalse(mergeStrict(analysis2, analysis3).isRollup());
+    Assert.assertTrue(mergeStrict(analysis4, analysis5).isRollup());
   }
 
   private static SegmentAnalysis mergeStrict(SegmentAnalysis analysis1, SegmentAnalysis analysis2)

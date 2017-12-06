@@ -26,15 +26,17 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.inject.Inject;
-import com.metamx.common.guava.Sequence;
-import com.metamx.common.guava.Sequences;
-import com.metamx.common.logger.Logger;
+import io.druid.data.input.impl.TimestampSpec;
+import io.druid.java.util.common.granularity.Granularity;
+import io.druid.java.util.common.guava.Sequence;
+import io.druid.java.util.common.guava.Sequences;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.query.AbstractPrioritizedCallable;
-import io.druid.query.BaseQuery;
 import io.druid.query.ConcatQueryRunner;
 import io.druid.query.Query;
-import io.druid.query.QueryContextKeys;
+import io.druid.query.QueryContexts;
 import io.druid.query.QueryInterruptedException;
+import io.druid.query.QueryPlus;
 import io.druid.query.QueryRunner;
 import io.druid.query.QueryRunnerFactory;
 import io.druid.query.QueryToolChest;
@@ -49,7 +51,7 @@ import io.druid.segment.Segment;
 import org.joda.time.Interval;
 
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
@@ -82,12 +84,13 @@ public class SegmentMetadataQueryRunnerFactory implements QueryRunnerFactory<Seg
     return new QueryRunner<SegmentAnalysis>()
     {
       @Override
-      public Sequence<SegmentAnalysis> run(Query<SegmentAnalysis> inQ, Map<String, Object> responseContext)
+      public Sequence<SegmentAnalysis> run(QueryPlus<SegmentAnalysis> inQ, Map<String, Object> responseContext)
       {
-        SegmentMetadataQuery query = (SegmentMetadataQuery) inQ;
-        final SegmentAnalyzer analyzer = new SegmentAnalyzer(query.getAnalysisTypes());
+        SegmentMetadataQuery updatedQuery = ((SegmentMetadataQuery) inQ.getQuery())
+            .withFinalizedAnalysisTypes(toolChest.getConfig());
+        final SegmentAnalyzer analyzer = new SegmentAnalyzer(updatedQuery.getAnalysisTypes());
         final Map<String, ColumnAnalysis> analyzedColumns = analyzer.analyze(segment);
-        final int numRows = analyzer.numRows(segment);
+        final long numRows = analyzer.numRows(segment);
         long totalSize = 0;
 
         if (analyzer.analyzingSize()) {
@@ -96,7 +99,7 @@ public class SegmentMetadataQueryRunnerFactory implements QueryRunnerFactory<Seg
         }
 
         Map<String, ColumnAnalysis> columns = Maps.newTreeMap();
-        ColumnIncluderator includerator = query.getToInclude();
+        ColumnIncluderator includerator = updatedQuery.getToInclude();
         for (Map.Entry<String, ColumnAnalysis> entry : analyzedColumns.entrySet()) {
           final String columnName = entry.getKey();
           final ColumnAnalysis column = entry.getValue();
@@ -108,11 +111,13 @@ public class SegmentMetadataQueryRunnerFactory implements QueryRunnerFactory<Seg
             columns.put(columnName, column);
           }
         }
-        List<Interval> retIntervals = query.analyzingInterval() ? Arrays.asList(segment.getDataInterval()) : null;
+        List<Interval> retIntervals = updatedQuery.analyzingInterval() ?
+                                      Collections.singletonList(segment.getDataInterval()) : null;
 
         final Map<String, AggregatorFactory> aggregators;
-        if (query.hasAggregators()) {
-          final Metadata metadata = segment.asStorageAdapter().getMetadata();
+        Metadata metadata = null;
+        if (updatedQuery.hasAggregators()) {
+          metadata = segment.asStorageAdapter().getMetadata();
           if (metadata != null && metadata.getAggregators() != null) {
             aggregators = Maps.newHashMap();
             for (AggregatorFactory aggregator : metadata.getAggregators()) {
@@ -125,15 +130,51 @@ public class SegmentMetadataQueryRunnerFactory implements QueryRunnerFactory<Seg
           aggregators = null;
         }
 
+        final TimestampSpec timestampSpec;
+        if (updatedQuery.hasTimestampSpec()) {
+          if (metadata == null) {
+            metadata = segment.asStorageAdapter().getMetadata();
+          }
+          timestampSpec = metadata != null ? metadata.getTimestampSpec() : null;
+        } else {
+          timestampSpec = null;
+        }
+
+        final Granularity queryGranularity;
+        if (updatedQuery.hasQueryGranularity()) {
+          if (metadata == null) {
+            metadata = segment.asStorageAdapter().getMetadata();
+          }
+          queryGranularity = metadata != null ? metadata.getQueryGranularity() : null;
+        } else {
+          queryGranularity = null;
+        }
+
+        Boolean rollup = null;
+        if (updatedQuery.hasRollup()) {
+          if (metadata == null) {
+            metadata = segment.asStorageAdapter().getMetadata();
+          }
+          rollup = metadata != null ? metadata.isRollup() : null;
+          if (rollup == null) {
+            // in this case, this segment is built before no-rollup function is coded,
+            // thus it is built with rollup
+            rollup = Boolean.TRUE;
+          }
+        }
+
         return Sequences.simple(
-            Arrays.asList(
+            Collections.singletonList(
                 new SegmentAnalysis(
                     segment.getIdentifier(),
                     retIntervals,
                     columns,
                     totalSize,
                     numRows,
-                    aggregators
+                    aggregators,
+                    timestampSpec,
+                    queryGranularity,
+                    rollup
                 )
             )
         );
@@ -159,40 +200,48 @@ public class SegmentMetadataQueryRunnerFactory implements QueryRunnerFactory<Seg
                 {
                   @Override
                   public Sequence<SegmentAnalysis> run(
-                      final Query<SegmentAnalysis> query,
+                      final QueryPlus<SegmentAnalysis> queryPlus,
                       final Map<String, Object> responseContext
                   )
                   {
-                    final int priority = BaseQuery.getContextPriority(query, 0);
-                    ListenableFuture<Sequence<SegmentAnalysis>> future = queryExecutor.submit(
+                    final Query<SegmentAnalysis> query = queryPlus.getQuery();
+                    final int priority = QueryContexts.getPriority(query);
+                    final QueryPlus<SegmentAnalysis> threadSafeQueryPlus = queryPlus.withoutThreadUnsafeState();
+                    final ListenableFuture<Sequence<SegmentAnalysis>> future = queryExecutor.submit(
                         new AbstractPrioritizedCallable<Sequence<SegmentAnalysis>>(priority)
                         {
                           @Override
                           public Sequence<SegmentAnalysis> call() throws Exception
                           {
                             return Sequences.simple(
-                                Sequences.toList(input.run(query, responseContext), new ArrayList<SegmentAnalysis>())
+                                Sequences.toList(
+                                    input.run(threadSafeQueryPlus, responseContext),
+                                    new ArrayList<>()
+                                )
                             );
                           }
                         }
                     );
                     try {
                       queryWatcher.registerQuery(query, future);
-                      final Number timeout = query.getContextValue(QueryContextKeys.TIMEOUT, (Number) null);
-                      return timeout == null ? future.get() : future.get(timeout.longValue(), TimeUnit.MILLISECONDS);
+                      if (QueryContexts.hasTimeout(query)) {
+                        return future.get(QueryContexts.getTimeout(query), TimeUnit.MILLISECONDS);
+                      } else {
+                        return future.get();
+                      }
                     }
                     catch (InterruptedException e) {
                       log.warn(e, "Query interrupted, cancelling pending results, query id [%s]", query.getId());
                       future.cancel(true);
-                      throw new QueryInterruptedException("Query interrupted");
+                      throw new QueryInterruptedException(e);
                     }
                     catch (CancellationException e) {
-                      throw new QueryInterruptedException("Query cancelled");
+                      throw new QueryInterruptedException(e);
                     }
                     catch (TimeoutException e) {
                       log.info("Query timeout, cancelling pending results for query id [%s]", query.getId());
                       future.cancel(true);
-                      throw new QueryInterruptedException("Query timeout");
+                      throw new QueryInterruptedException(e);
                     }
                     catch (ExecutionException e) {
                       throw Throwables.propagate(e.getCause());

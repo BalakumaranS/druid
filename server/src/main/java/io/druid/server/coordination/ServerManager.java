@@ -21,22 +21,18 @@ package io.druid.server.coordination;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Function;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Ordering;
 import com.google.inject.Inject;
-import com.metamx.common.ISE;
-import com.metamx.common.guava.FunctionalIterable;
 import com.metamx.emitter.EmittingLogger;
 import com.metamx.emitter.service.ServiceEmitter;
-import com.metamx.emitter.service.ServiceMetricEvent;
 import io.druid.client.CachingQueryRunner;
 import io.druid.client.cache.Cache;
 import io.druid.client.cache.CacheConfig;
-import io.druid.collections.CountingMap;
 import io.druid.guice.annotations.BackgroundCaching;
 import io.druid.guice.annotations.Processing;
 import io.druid.guice.annotations.Smile;
+import io.druid.java.util.common.ISE;
+import io.druid.java.util.common.guava.FunctionalIterable;
 import io.druid.query.BySegmentQueryRunner;
 import io.druid.query.CPUTimeMetricQueryRunner;
 import io.druid.query.DataSource;
@@ -44,6 +40,7 @@ import io.druid.query.FinalizeResultsQueryRunner;
 import io.druid.query.MetricsEmittingQueryRunner;
 import io.druid.query.NoopQueryRunner;
 import io.druid.query.Query;
+import io.druid.query.QueryMetrics;
 import io.druid.query.QueryRunner;
 import io.druid.query.QueryRunnerFactory;
 import io.druid.query.QueryRunnerFactoryConglomerate;
@@ -56,10 +53,9 @@ import io.druid.query.TableDataSource;
 import io.druid.query.spec.SpecificSegmentQueryRunner;
 import io.druid.query.spec.SpecificSegmentSpec;
 import io.druid.segment.ReferenceCountingSegment;
-import io.druid.segment.Segment;
-import io.druid.segment.loading.SegmentLoader;
-import io.druid.segment.loading.SegmentLoadingException;
-import io.druid.timeline.DataSegment;
+import io.druid.server.SegmentManager;
+import io.druid.server.SetAndVerifyContextQueryRunner;
+import io.druid.server.initialization.ServerConfig;
 import io.druid.timeline.TimelineObjectHolder;
 import io.druid.timeline.VersionedIntervalTimeline;
 import io.druid.timeline.partition.PartitionChunk;
@@ -67,10 +63,8 @@ import io.druid.timeline.partition.PartitionHolder;
 import org.joda.time.Interval;
 
 import javax.annotation.Nullable;
-import java.io.IOException;
 import java.util.Arrays;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.Collections;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -79,32 +73,29 @@ import java.util.concurrent.atomic.AtomicLong;
 public class ServerManager implements QuerySegmentWalker
 {
   private static final EmittingLogger log = new EmittingLogger(ServerManager.class);
-  private final Object lock = new Object();
-  private final SegmentLoader segmentLoader;
   private final QueryRunnerFactoryConglomerate conglomerate;
   private final ServiceEmitter emitter;
   private final ExecutorService exec;
   private final ExecutorService cachingExec;
-  private final Map<String, VersionedIntervalTimeline<String, ReferenceCountingSegment>> dataSources;
-  private final CountingMap<String> dataSourceSizes = new CountingMap<String>();
-  private final CountingMap<String> dataSourceCounts = new CountingMap<String>();
   private final Cache cache;
   private final ObjectMapper objectMapper;
   private final CacheConfig cacheConfig;
+  private final SegmentManager segmentManager;
+  private final ServerConfig serverConfig;
 
   @Inject
   public ServerManager(
-      SegmentLoader segmentLoader,
       QueryRunnerFactoryConglomerate conglomerate,
       ServiceEmitter emitter,
       @Processing ExecutorService exec,
       @BackgroundCaching ExecutorService cachingExec,
       @Smile ObjectMapper objectMapper,
       Cache cache,
-      CacheConfig cacheConfig
+      CacheConfig cacheConfig,
+      SegmentManager segmentManager,
+      ServerConfig serverConfig
   )
   {
-    this.segmentLoader = segmentLoader;
     this.conglomerate = conglomerate;
     this.emitter = emitter;
 
@@ -113,137 +104,9 @@ public class ServerManager implements QuerySegmentWalker
     this.cache = cache;
     this.objectMapper = objectMapper;
 
-    this.dataSources = new HashMap<>();
     this.cacheConfig = cacheConfig;
-  }
-
-  public Map<String, Long> getDataSourceSizes()
-  {
-    synchronized (dataSourceSizes) {
-      return dataSourceSizes.snapshot();
-    }
-  }
-
-  public Map<String, Long> getDataSourceCounts()
-  {
-    synchronized (dataSourceCounts) {
-      return dataSourceCounts.snapshot();
-    }
-  }
-
-  public boolean isSegmentCached(final DataSegment segment) throws SegmentLoadingException
-  {
-    return segmentLoader.isSegmentLoaded(segment);
-  }
-
-  /**
-   * Load a single segment.
-   *
-   * @param segment segment to load
-   *
-   * @return true if the segment was newly loaded, false if it was already loaded
-   *
-   * @throws SegmentLoadingException if the segment cannot be loaded
-   */
-  public boolean loadSegment(final DataSegment segment) throws SegmentLoadingException
-  {
-    final Segment adapter;
-    try {
-      adapter = segmentLoader.getSegment(segment);
-    }
-    catch (SegmentLoadingException e) {
-      try {
-        segmentLoader.cleanup(segment);
-      }
-      catch (SegmentLoadingException e1) {
-        // ignore
-      }
-      throw e;
-    }
-
-    if (adapter == null) {
-      throw new SegmentLoadingException("Null adapter from loadSpec[%s]", segment.getLoadSpec());
-    }
-
-    synchronized (lock) {
-      String dataSource = segment.getDataSource();
-      VersionedIntervalTimeline<String, ReferenceCountingSegment> loadedIntervals = dataSources.get(dataSource);
-
-      if (loadedIntervals == null) {
-        loadedIntervals = new VersionedIntervalTimeline<>(Ordering.natural());
-        dataSources.put(dataSource, loadedIntervals);
-      }
-
-      PartitionHolder<ReferenceCountingSegment> entry = loadedIntervals.findEntry(
-          segment.getInterval(),
-          segment.getVersion()
-      );
-      if ((entry != null) && (entry.getChunk(segment.getShardSpec().getPartitionNum()) != null)) {
-        log.warn("Told to load a adapter for a segment[%s] that already exists", segment.getIdentifier());
-        return false;
-      }
-
-      loadedIntervals.add(
-          segment.getInterval(),
-          segment.getVersion(),
-          segment.getShardSpec().createChunk(new ReferenceCountingSegment(adapter))
-      );
-      synchronized (dataSourceSizes) {
-        dataSourceSizes.add(dataSource, segment.getSize());
-      }
-      synchronized (dataSourceCounts) {
-        dataSourceCounts.add(dataSource, 1L);
-      }
-      return true;
-    }
-  }
-
-  public void dropSegment(final DataSegment segment) throws SegmentLoadingException
-  {
-    String dataSource = segment.getDataSource();
-    synchronized (lock) {
-      VersionedIntervalTimeline<String, ReferenceCountingSegment> loadedIntervals = dataSources.get(dataSource);
-
-      if (loadedIntervals == null) {
-        log.info("Told to delete a queryable for a dataSource[%s] that doesn't exist.", dataSource);
-        return;
-      }
-
-      PartitionChunk<ReferenceCountingSegment> removed = loadedIntervals.remove(
-          segment.getInterval(),
-          segment.getVersion(),
-          segment.getShardSpec().createChunk((ReferenceCountingSegment) null)
-      );
-      ReferenceCountingSegment oldQueryable = (removed == null) ? null : removed.getObject();
-
-      if (oldQueryable != null) {
-        synchronized (dataSourceSizes) {
-          dataSourceSizes.add(dataSource, -segment.getSize());
-        }
-        synchronized (dataSourceCounts) {
-          dataSourceCounts.add(dataSource, -1L);
-        }
-
-        try {
-          log.info("Attempting to close segment %s", segment.getIdentifier());
-          oldQueryable.close();
-        }
-        catch (IOException e) {
-          log.makeAlert(e, "Exception closing segment")
-             .addData("dataSource", dataSource)
-             .addData("segmentId", segment.getIdentifier())
-             .emit();
-        }
-      } else {
-        log.info(
-            "Told to delete a queryable on dataSource[%s] for interval[%s] and version [%s] that I don't have.",
-            dataSource,
-            segment.getInterval(),
-            segment.getVersion()
-        );
-      }
-    }
-    segmentLoader.cleanup(segment);
+    this.segmentManager = segmentManager;
+    this.serverConfig = serverConfig;
   }
 
   @Override
@@ -255,7 +118,6 @@ public class ServerManager implements QuerySegmentWalker
     }
 
     final QueryToolChest<T, Query<T>> toolChest = factory.getToolchest();
-    final Function<Query<T>, ServiceMetricEvent.Builder> builderFn = getBuilderFn(toolChest);
     final AtomicLong cpuTimeAccumulator = new AtomicLong(0L);
 
     DataSource dataSource = query.getDataSource();
@@ -264,7 +126,9 @@ public class ServerManager implements QuerySegmentWalker
     }
     String dataSourceName = getDataSourceName(dataSource);
 
-    final VersionedIntervalTimeline<String, ReferenceCountingSegment> timeline = dataSources.get(dataSourceName);
+    final VersionedIntervalTimeline<String, ReferenceCountingSegment> timeline = segmentManager.getTimeline(
+        dataSourceName
+    );
 
     if (timeline == null) {
       return new NoopQueryRunner<T>();
@@ -312,7 +176,6 @@ public class ServerManager implements QuerySegmentWalker
                                     holder.getVersion(),
                                     input.getChunkNumber()
                                 ),
-                                builderFn,
                                 cpuTimeAccumulator
                             );
                           }
@@ -327,7 +190,7 @@ public class ServerManager implements QuerySegmentWalker
             toolChest.mergeResults(factory.mergeRunners(exec, queryRunners)),
             toolChest
         ),
-        builderFn,
+        toolChest,
         emitter,
         cpuTimeAccumulator,
         true
@@ -354,7 +217,7 @@ public class ServerManager implements QuerySegmentWalker
 
     String dataSourceName = getDataSourceName(query.getDataSource());
 
-    final VersionedIntervalTimeline<String, ReferenceCountingSegment> timeline = dataSources.get(
+    final VersionedIntervalTimeline<String, ReferenceCountingSegment> timeline = segmentManager.getTimeline(
         dataSourceName
     );
 
@@ -362,7 +225,6 @@ public class ServerManager implements QuerySegmentWalker
       return new NoopQueryRunner<T>();
     }
 
-    final Function<Query<T>, ServiceMetricEvent.Builder> builderFn = getBuilderFn(toolChest);
     final AtomicLong cpuTimeAccumulator = new AtomicLong(0L);
 
     FunctionalIterable<QueryRunner<T>> queryRunners = FunctionalIterable
@@ -385,12 +247,12 @@ public class ServerManager implements QuerySegmentWalker
 
                 final PartitionChunk<ReferenceCountingSegment> chunk = entry.getChunk(input.getPartitionNumber());
                 if (chunk == null) {
-                  return Arrays.<QueryRunner<T>>asList(new ReportTimelineMissingSegmentQueryRunner<T>(input));
+                  return Collections.singletonList(new ReportTimelineMissingSegmentQueryRunner<T>(input));
                 }
 
                 final ReferenceCountingSegment adapter = chunk.getObject();
-                return Arrays.asList(
-                    buildAndDecorateQueryRunner(factory, toolChest, adapter, input, builderFn, cpuTimeAccumulator)
+                return Collections.singletonList(
+                    buildAndDecorateQueryRunner(factory, toolChest, adapter, input, cpuTimeAccumulator)
                 );
               }
             }
@@ -401,7 +263,7 @@ public class ServerManager implements QuerySegmentWalker
             toolChest.mergeResults(factory.mergeRunners(exec, queryRunners)),
             toolChest
         ),
-        builderFn,
+        toolChest,
         emitter,
         cpuTimeAccumulator,
         true
@@ -413,65 +275,48 @@ public class ServerManager implements QuerySegmentWalker
       final QueryToolChest<T, Query<T>> toolChest,
       final ReferenceCountingSegment adapter,
       final SegmentDescriptor segmentDescriptor,
-      final Function<Query<T>, ServiceMetricEvent.Builder> builderFn,
       final AtomicLong cpuTimeAccumulator
   )
   {
     SpecificSegmentSpec segmentSpec = new SpecificSegmentSpec(segmentDescriptor);
-    return CPUTimeMetricQueryRunner.safeBuild(
-        new SpecificSegmentQueryRunner<T>(
-            new MetricsEmittingQueryRunner<T>(
-                emitter,
-                builderFn,
-                new BySegmentQueryRunner<T>(
-                    adapter.getIdentifier(),
-                    adapter.getDataInterval().getStart(),
-                    new CachingQueryRunner<T>(
-                        adapter.getIdentifier(),
-                        segmentDescriptor,
-                        objectMapper,
-                        cache,
-                        toolChest,
-                        new MetricsEmittingQueryRunner<T>(
-                            emitter,
-                            new Function<Query<T>, ServiceMetricEvent.Builder>()
-                            {
-                              @Override
-                              public ServiceMetricEvent.Builder apply(@Nullable final Query<T> input)
-                              {
-                                return toolChest.makeMetricBuilder(input);
-                              }
-                            },
-                            new ReferenceCountingSegmentQueryRunner<T>(factory, adapter, segmentDescriptor),
-                            "query/segment/time",
-                            ImmutableMap.of("segment", adapter.getIdentifier())
-                        ),
-                        cachingExec,
-                        cacheConfig
-                    )
-                ),
-                "query/segmentAndCache/time",
-                ImmutableMap.of("segment", adapter.getIdentifier())
-            ).withWaitMeasuredFromNow(),
-            segmentSpec
-        ),
-        builderFn,
-        emitter,
-        cpuTimeAccumulator,
-        false
+    String segmentId = adapter.getIdentifier();
+    return new SetAndVerifyContextQueryRunner(
+        serverConfig,
+        CPUTimeMetricQueryRunner.safeBuild(
+            new SpecificSegmentQueryRunner<T>(
+                new MetricsEmittingQueryRunner<T>(
+                    emitter,
+                    toolChest,
+                    new BySegmentQueryRunner<T>(
+                        segmentId,
+                        adapter.getDataInterval().getStart(),
+                        new CachingQueryRunner<T>(
+                            segmentId,
+                            segmentDescriptor,
+                            objectMapper,
+                            cache,
+                            toolChest,
+                            new MetricsEmittingQueryRunner<T>(
+                                emitter,
+                                toolChest,
+                                new ReferenceCountingSegmentQueryRunner<T>(factory, adapter, segmentDescriptor),
+                                QueryMetrics::reportSegmentTime,
+                                queryMetrics -> queryMetrics.segment(segmentId)
+                            ),
+                            cachingExec,
+                            cacheConfig
+                        )
+                    ),
+                    QueryMetrics::reportSegmentAndCacheTime,
+                    queryMetrics -> queryMetrics.segment(segmentId)
+                ).withWaitMeasuredFromNow(),
+                segmentSpec
+            ),
+            toolChest,
+            emitter,
+            cpuTimeAccumulator,
+            false
+        )
     );
-  }
-
-  private static <T> Function<Query<T>, ServiceMetricEvent.Builder> getBuilderFn(final QueryToolChest<T, Query<T>> toolChest)
-  {
-    return new Function<Query<T>, ServiceMetricEvent.Builder>()
-    {
-      @Nullable
-      @Override
-      public ServiceMetricEvent.Builder apply(@Nullable Query<T> input)
-      {
-        return toolChest.makeMetricBuilder(input);
-      }
-    };
   }
 }

@@ -19,16 +19,26 @@
 
 package io.druid.common.utils;
 
-import com.metamx.common.ISE;
+import io.druid.java.util.common.ISE;
 
 import java.io.IOException;
 import java.net.ServerSocket;
+import java.util.Random;
 
 /**
  */
 public class SocketUtil
 {
-  public static int findOpenPort(int startPort)
+
+  private static final Random rnd = new Random(System.currentTimeMillis());
+
+  public static int findOpenPort(int basePort)
+  {
+    final int startPort = basePort < 0 ? -1 : rnd.nextInt(0x7fff) + basePort;
+    return findOpenPortFrom(startPort);
+  }
+
+  public static int findOpenPortFrom(int startPort)
   {
     int currPort = startPort;
 
@@ -53,6 +63,6 @@ public class SocketUtil
       }
     }
 
-    throw new ISE("Unable to find open port between[%d] and [%d]", startPort, currPort);
+    throw new ISE("Unable to find open port between [%d] and [%d]", startPort, currPort);
   }
 }

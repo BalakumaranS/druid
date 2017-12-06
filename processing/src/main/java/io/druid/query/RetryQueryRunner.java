@@ -23,13 +23,13 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
-import com.metamx.common.guava.MergeSequence;
-import com.metamx.common.guava.Sequence;
-import com.metamx.common.guava.Sequences;
-import com.metamx.common.guava.Yielder;
-import com.metamx.common.guava.YieldingAccumulator;
-import com.metamx.common.guava.YieldingSequenceBase;
 import com.metamx.emitter.EmittingLogger;
+import io.druid.java.util.common.guava.MergeSequence;
+import io.druid.java.util.common.guava.Sequence;
+import io.druid.java.util.common.guava.Sequences;
+import io.druid.java.util.common.guava.Yielder;
+import io.druid.java.util.common.guava.YieldingAccumulator;
+import io.druid.java.util.common.guava.YieldingSequenceBase;
 import io.druid.query.spec.MultipleSpecificSegmentSpec;
 import io.druid.segment.SegmentMissingException;
 
@@ -41,28 +41,25 @@ public class RetryQueryRunner<T> implements QueryRunner<T>
   private static final EmittingLogger log = new EmittingLogger(RetryQueryRunner.class);
 
   private final QueryRunner<T> baseRunner;
-  private final QueryToolChest<T, Query<T>> toolChest;
   private final RetryQueryRunnerConfig config;
   private final ObjectMapper jsonMapper;
 
   public RetryQueryRunner(
       QueryRunner<T> baseRunner,
-      QueryToolChest<T, Query<T>> toolChest,
       RetryQueryRunnerConfig config,
       ObjectMapper jsonMapper
   )
   {
     this.baseRunner = baseRunner;
-    this.toolChest = toolChest;
     this.config = config;
     this.jsonMapper = jsonMapper;
   }
 
   @Override
-  public Sequence<T> run(final Query<T> query, final Map<String, Object> context)
+  public Sequence<T> run(final QueryPlus<T> queryPlus, final Map<String, Object> context)
   {
     final List<Sequence<T>> listOfSequences = Lists.newArrayList();
-    listOfSequences.add(baseRunner.run(query, context));
+    listOfSequences.add(baseRunner.run(queryPlus, context));
 
     return new YieldingSequenceBase<T>()
     {
@@ -71,21 +68,22 @@ public class RetryQueryRunner<T> implements QueryRunner<T>
           OutType initValue, YieldingAccumulator<OutType, T> accumulator
       )
       {
-        final List<SegmentDescriptor> missingSegments = getMissingSegments(context);
+        List<SegmentDescriptor> missingSegments = getMissingSegments(context);
 
         if (!missingSegments.isEmpty()) {
           for (int i = 0; i < config.getNumTries(); i++) {
             log.info("[%,d] missing segments found. Retry attempt [%,d]", missingSegments.size(), i);
 
             context.put(Result.MISSING_SEGMENTS_KEY, Lists.newArrayList());
-            final Query<T> retryQuery = query.withQuerySegmentSpec(
+            final QueryPlus<T> retryQueryPlus = queryPlus.withQuerySegmentSpec(
                 new MultipleSpecificSegmentSpec(
                     missingSegments
                 )
             );
-            Sequence<T> retrySequence = baseRunner.run(retryQuery, context);
+            Sequence<T> retrySequence = baseRunner.run(retryQueryPlus, context);
             listOfSequences.add(retrySequence);
-            if (getMissingSegments(context).isEmpty()) {
+            missingSegments = getMissingSegments(context);
+            if (missingSegments.isEmpty()) {
               break;
             }
           }
@@ -96,12 +94,11 @@ public class RetryQueryRunner<T> implements QueryRunner<T>
           }
 
           return new MergeSequence<>(
-              query.getResultOrdering(),
+              queryPlus.getQuery().getResultOrdering(),
               Sequences.simple(listOfSequences)).toYielder(
               initValue, accumulator
           );
-        }
-        else {
+        } else {
           return Iterables.getOnlyElement(listOfSequences).toYielder(initValue, accumulator);
         }
       }

@@ -22,9 +22,11 @@ package io.druid.segment;
 import com.google.common.base.Predicate;
 import com.google.common.collect.Iterables;
 import io.druid.segment.column.ColumnCapabilities;
+import io.druid.segment.data.BitmapValues;
 import io.druid.segment.data.Indexed;
-import io.druid.segment.data.IndexedInts;
 import org.joda.time.Interval;
+
+import java.util.Map;
 
 /**
  */
@@ -64,7 +66,7 @@ public class RowboatFilteringIndexAdapter implements IndexableAdapter
   }
 
   @Override
-  public Indexed<String> getDimValueLookup(String dimension)
+  public Indexed<Comparable> getDimValueLookup(String dimension)
   {
     return baseAdapter.getDimValueLookup(dimension);
   }
@@ -88,14 +90,20 @@ public class RowboatFilteringIndexAdapter implements IndexableAdapter
   }
 
   @Override
-  public IndexedInts getBitmapIndex(String dimension, int dictId)
+  public BitmapValues getBitmapValues(String dimension, int dictId)
   {
-    return baseAdapter.getBitmapIndex(dimension, dictId);
+    return baseAdapter.getBitmapValues(dimension, dictId);
   }
 
   @Override
   public Metadata getMetadata()
   {
     return baseAdapter.getMetadata();
+  }
+
+  @Override
+  public Map<String, DimensionHandler> getDimensionHandlers()
+  {
+    return baseAdapter.getDimensionHandlers();
   }
 }

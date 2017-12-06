@@ -26,12 +26,11 @@
     <parent>
         <groupId>io.druid</groupId>
         <artifactId>druid</artifactId>
-        <version>0.9.0-SNAPSHOT</version>
+        <version>0.11.1-SNAPSHOT</version>
     </parent>
 
     <properties>
-        <apache.kafka.version>0.8.2.1</apache.kafka.version>
-        <zkclient.version>0.4</zkclient.version>
+        <apache.kafka.version>0.10.2.0</apache.kafka.version>
     </properties>
 
     <dependencies>
@@ -47,8 +46,19 @@
         </dependency>
         <dependency>
             <groupId>io.druid.extensions</groupId>
+            <artifactId>druid-datasketches</artifactId>
+            <version>${project.parent.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.druid.extensions</groupId>
             <artifactId>druid-kafka-eight</artifactId>
             <version>${project.parent.version}</version>
+            <exclusions>
+                <exclusion>
+                    <artifactId>kafka_2.10</artifactId>
+                    <groupId>org.apache.kafka</groupId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <dependency>
             <groupId>io.druid.extensions</groupId>
@@ -59,6 +69,17 @@
             <groupId>io.druid.extensions</groupId>
             <artifactId>mysql-metadata-storage</artifactId>
             <version>${project.parent.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.druid.extensions</groupId>
+            <artifactId>druid-kafka-indexing-service</artifactId>
+            <version>${project.parent.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.kafka</groupId>
+                    <artifactId>kafka-clients</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <dependency>
             <groupId>io.druid</groupId>
@@ -82,25 +103,17 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>com.101tec</groupId>
-            <artifactId>zkclient</artifactId>
-            <version>${zkclient.version}</version>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.apache.zookeeper</groupId>
-                    <artifactId>zookeeper</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <dependency>
             <groupId>org.apache.kafka</groupId>
-            <artifactId>kafka_2.10</artifactId>
+            <artifactId>kafka_2.11</artifactId>
             <version>${apache.kafka.version}</version>
-	    <!-- without this exclusion, there's interference that affects the log level -->
             <exclusions>
                 <exclusion>
-                    <groupId>org.slf4j</groupId>
+                    <artifactId>log4j</artifactId>
+                    <groupId>log4j</groupId>
+                </exclusion>
+                <exclusion>
                     <artifactId>slf4j-log4j12</artifactId>
+                    <groupId>org.slf4j</groupId>
                 </exclusion>
             </exclusions>
         </dependency>
@@ -118,25 +131,25 @@
                 </configuration>
             </plugin>
             <plugin>
-              <groupId>org.apache.maven.plugins</groupId>
-              <artifactId>maven-jar-plugin</artifactId>
-              <configuration>
-		<archive>
-                  <manifest>
-                    <mainClass>org.testng.TestNG</mainClass>
-                  </manifest>
-		</archive>
-              </configuration>
-              <executions> 
-		<execution> 
-                  <id>test-jar</id>
-                  <phase>package</phase> 
-                  <goals> 
-                    <goal>test-jar</goal> 
-                  </goals>
-		</execution> 
-              </executions>
-	    </plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <mainClass>org.testng.TestNG</mainClass>
+                        </manifest>
+                    </archive>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>test-jar</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>test-jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 
@@ -190,11 +203,23 @@
                                 -Dfile.encoding=UTF-8
                                 -Dtestrunfactory=org.testng.DruidTestRunnerFactory
                                 -Ddruid.test.config.dockerIp=${env.DOCKER_IP}
+                                -Ddruid.test.config.hadoopDir=${env.HADOOP_DIR}
                                 -Ddruid.zk.service.host=${env.DOCKER_IP}
                             </argLine>
                             <suiteXmlFiles>
                                 <suiteXmlFile>src/test/resources/testng.xml</suiteXmlFile>
                             </suiteXmlFiles>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>de.thetaphi</groupId>
+                        <artifactId>forbiddenapis</artifactId>
+                        <configuration>
+                            <signaturesFiles>
+                                <!-- Needed because of https://github.com/policeman-tools/forbidden-apis/issues/126 -->
+                                <signaturesFile>../codestyle/joda-time-forbidden-apis.txt</signaturesFile>
+                                <signaturesFile>../codestyle/druid-forbidden-apis.txt</signaturesFile>
+                            </signaturesFiles>
                         </configuration>
                     </plugin>
                 </plugins>
@@ -228,6 +253,17 @@
                             <suiteXmlFiles>
                                 <suiteXmlFile>src/test/resources/testng.xml</suiteXmlFile>
                             </suiteXmlFiles>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>de.thetaphi</groupId>
+                        <artifactId>forbiddenapis</artifactId>
+                        <configuration>
+                            <signaturesFiles>
+                                <!-- Needed because of https://github.com/policeman-tools/forbidden-apis/issues/126 -->
+                                <signaturesFile>../codestyle/joda-time-forbidden-apis.txt</signaturesFile>
+                                <signaturesFile>../codestyle/druid-forbidden-apis.txt</signaturesFile>
+                            </signaturesFiles>
                         </configuration>
                     </plugin>
                 </plugins>

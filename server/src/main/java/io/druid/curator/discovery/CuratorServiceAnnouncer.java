@@ -30,8 +30,11 @@ import org.apache.curator.x.discovery.ServiceInstance;
 import java.util.Map;
 
 /**
+ * This class is deprecated, Add service to {@link io.druid.discovery.DruidNodeAnnouncer} node announcement instead.
+ *
  * Uses the Curator Service Discovery recipe to announce services.
  */
+@Deprecated
 public class CuratorServiceAnnouncer implements ServiceAnnouncer
 {
   private static final EmittingLogger log = new EmittingLogger(CuratorServiceAnnouncer.class);
@@ -61,10 +64,11 @@ public class CuratorServiceAnnouncer implements ServiceAnnouncer
       } else {
         try {
           instance = ServiceInstance.<Void>builder()
-                                    .name(serviceName)
-                                    .address(service.getHost())
-                                    .port(service.getPort())
-                                    .build();
+              .name(serviceName)
+              .address(service.getHost())
+              .port(service.getPlaintextPort())
+              .sslPort(service.getTlsPort())
+              .build();
         }
         catch (Exception e) {
           throw Throwables.propagate(e);

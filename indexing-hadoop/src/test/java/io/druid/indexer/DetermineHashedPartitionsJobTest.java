@@ -22,19 +22,22 @@ package io.druid.indexer;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.io.Files;
-import com.metamx.common.Granularity;
 import io.druid.data.input.impl.DelimitedParseSpec;
 import io.druid.data.input.impl.DimensionsSpec;
 import io.druid.data.input.impl.StringInputRowParser;
 import io.druid.data.input.impl.TimestampSpec;
-import io.druid.granularity.QueryGranularity;
 import io.druid.indexer.partitions.HashedPartitionsSpec;
+import io.druid.java.util.common.Intervals;
+import io.druid.java.util.common.granularity.Granularities;
+import io.druid.java.util.common.granularity.Granularity;
+import io.druid.java.util.common.granularity.PeriodGranularity;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.DoubleSumAggregatorFactory;
 import io.druid.segment.indexing.DataSchema;
 import io.druid.segment.indexing.granularity.UniformGranularitySpec;
-import org.joda.time.DateTime;
+import org.joda.time.DateTimeZone;
 import org.joda.time.Interval;
+import org.joda.time.Period;
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -55,8 +58,9 @@ public class DetermineHashedPartitionsJobTest
   private int[] expectedNumOfShards;
   private int errorMargin;
 
-  @Parameterized.Parameters(name = "File={0}, TargetPartitionSize={1}, Interval={2}, ErrorMargin={3}, NumTimeBuckets={4}, NumShards={5}")
-  public static Collection<?> data(){
+  @Parameterized.Parameters(name = "File={0}, TargetPartitionSize={1}, Interval={2}, ErrorMargin={3}, NumTimeBuckets={4}, NumShards={5}, SegmentGranularity={6}")
+  public static Collection<?> data()
+  {
     int[] first = new int[1];
     Arrays.fill(first, 13);
     int[] second = new int[6];
@@ -69,40 +73,73 @@ public class DetermineHashedPartitionsJobTest
     return Arrays.asList(
         new Object[][]{
             {
-                DetermineHashedPartitionsJobTest.class.getClass().getResource("/druid.test.data.with.duplicate.rows.tsv").getPath(),
+                DetermineHashedPartitionsJobTest.class.getResource("/druid.test.data.with.duplicate.rows.tsv").getPath(),
                 1L,
                 "2011-04-10T00:00:00.000Z/2011-04-11T00:00:00.000Z",
                 0,
                 1,
-                first
+                first,
+                Granularities.DAY
             },
             {
-                DetermineHashedPartitionsJobTest.class.getClass().getResource("/druid.test.data.with.duplicate.rows.tsv").getPath(),
+                DetermineHashedPartitionsJobTest.class.getResource("/druid.test.data.with.duplicate.rows.tsv").getPath(),
                 100L,
                 "2011-04-10T00:00:00.000Z/2011-04-16T00:00:00.000Z",
                 0,
                 6,
-                second
+                second,
+                Granularities.DAY
             },
             {
-                DetermineHashedPartitionsJobTest.class.getClass().getResource("/druid.test.data.with.duplicate.rows.tsv").getPath(),
+                DetermineHashedPartitionsJobTest.class.getResource("/druid.test.data.with.duplicate.rows.tsv").getPath(),
                 1L,
                 "2011-04-10T00:00:00.000Z/2011-04-16T00:00:00.000Z",
                 0,
                 6,
-                third
+                third,
+                Granularities.DAY
+            },
+            {
+                DetermineHashedPartitionsJobTest.class.getResource("/druid.test.data.with.duplicate.rows.tsv").getPath(),
+                1L,
+                null,
+                0,
+                6,
+                third,
+                Granularities.DAY
+            },
+            {
+                DetermineHashedPartitionsJobTest.class.getResource("/druid.test.data.with.rows.in.timezone.tsv").getPath(),
+                1L,
+                null,
+                0,
+                1,
+                first,
+                new PeriodGranularity(new Period("P1D"), null, DateTimeZone.forID("America/Los_Angeles"))
             }
         }
     );
   }
 
-  public DetermineHashedPartitionsJobTest(String dataFilePath, long targetPartitionSize, String interval, int errorMargin, int expectedNumTimeBuckets, int[] expectedNumOfShards) throws IOException
+  public DetermineHashedPartitionsJobTest(
+      String dataFilePath,
+      long targetPartitionSize,
+      String interval,
+      int errorMargin,
+      int expectedNumTimeBuckets,
+      int[] expectedNumOfShards,
+      Granularity segmentGranularity
+  ) throws IOException
   {
     this.expectedNumOfShards = expectedNumOfShards;
     this.expectedNumTimeBuckets = expectedNumTimeBuckets;
     this.errorMargin = errorMargin;
     File tmpDir = Files.createTempDir();
-    tmpDir.deleteOnExit();
+
+    ImmutableList<Interval> intervals = null;
+    if (interval != null) {
+      intervals = ImmutableList.of(Intervals.of(interval));
+    }
 
     HadoopIngestionSpec ingestionSpec = new HadoopIngestionSpec(
         new DataSchema(
@@ -112,7 +149,12 @@ public class DetermineHashedPartitionsJobTest
                     new DelimitedParseSpec(
                         new TimestampSpec("ts", null, null),
                         new DimensionsSpec(
-                            ImmutableList.of("market", "quality", "placement", "placementish"),
+                            DimensionsSpec.getDefaultSchemas(ImmutableList.of(
+                                "market",
+                                "quality",
+                                "placement",
+                                "placementish"
+                            )),
                             null,
                             null
                         ),
@@ -125,17 +167,21 @@ public class DetermineHashedPartitionsJobTest
                             "placement",
                             "placementish",
                             "index"
-                        )
-                    )
+                        ),
+                        false,
+                        0
+                    ),
+                    null
                 ),
                 Map.class
             ),
             new AggregatorFactory[]{new DoubleSumAggregatorFactory("index", "index")},
             new UniformGranularitySpec(
-                Granularity.DAY,
-                QueryGranularity.NONE,
-                ImmutableList.of(new Interval(interval))
+                segmentGranularity,
+                Granularities.NONE,
+                intervals
             ),
+            null,
             HadoopDruidIndexerConfig.JSON_MAPPER
         ),
         new HadoopIOConfig(
@@ -149,7 +195,7 @@ public class DetermineHashedPartitionsJobTest
         new HadoopTuningConfig(
             tmpDir.getAbsolutePath(),
             null,
-            new HashedPartitionsSpec(targetPartitionSize, null, true, null),
+            new HashedPartitionsSpec(targetPartitionSize, null, true, null, null),
             null,
             null,
             null,
@@ -162,6 +208,9 @@ public class DetermineHashedPartitionsJobTest
             false,
             null,
             null,
+            null,
+            false,
+            false,
             null
         )
     );
@@ -169,16 +218,17 @@ public class DetermineHashedPartitionsJobTest
   }
 
   @Test
-  public void testDetermineHashedPartitions(){
+  public void testDetermineHashedPartitions()
+  {
     DetermineHashedPartitionsJob determineHashedPartitionsJob = new DetermineHashedPartitionsJob(indexerConfig);
     determineHashedPartitionsJob.run();
-    Map<DateTime, List<HadoopyShardSpec>> shardSpecs = indexerConfig.getSchema().getTuningConfig().getShardSpecs();
+    Map<Long, List<HadoopyShardSpec>> shardSpecs = indexerConfig.getSchema().getTuningConfig().getShardSpecs();
     Assert.assertEquals(
         expectedNumTimeBuckets,
         shardSpecs.entrySet().size()
     );
-    int i=0;
-    for(Map.Entry<DateTime, List<HadoopyShardSpec>> entry : shardSpecs.entrySet()) {
+    int i = 0;
+    for (Map.Entry<Long, List<HadoopyShardSpec>> entry : shardSpecs.entrySet()) {
       Assert.assertEquals(
           expectedNumOfShards[i++],
           entry.getValue().size(),

@@ -19,12 +19,14 @@
 
 package io.druid.client.selector;
 
-import com.metamx.common.ISE;
+import com.google.common.collect.Iterables;
 import io.druid.timeline.DataSegment;
+import it.unimi.dsi.fastutil.ints.Int2ObjectRBTreeMap;
 
-import java.util.Map;
+import javax.annotation.Nullable;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
-import java.util.TreeMap;
 
 /**
  */
@@ -37,25 +39,30 @@ public abstract class AbstractTierSelectorStrategy implements TierSelectorStrate
     this.serverSelectorStrategy = serverSelectorStrategy;
   }
 
+  @Nullable
   @Override
   public QueryableDruidServer pick(
-      TreeMap<Integer, Set<QueryableDruidServer>> prioritizedServers, DataSegment segment
+      Int2ObjectRBTreeMap<Set<QueryableDruidServer>> prioritizedServers,
+      DataSegment segment
   )
   {
-    final Map.Entry<Integer, Set<QueryableDruidServer>> priorityServers = prioritizedServers.pollFirstEntry();
+    return Iterables.getOnlyElement(pick(prioritizedServers, segment, 1), null);
+  }
 
-    if (priorityServers == null) {
-      return null;
+  @Override
+  public List<QueryableDruidServer> pick(
+      Int2ObjectRBTreeMap<Set<QueryableDruidServer>> prioritizedServers,
+      DataSegment segment,
+      int numServersToPick
+  )
+  {
+    List<QueryableDruidServer> result = new ArrayList<>(numServersToPick);
+    for (Set<QueryableDruidServer> priorityServers : prioritizedServers.values()) {
+      result.addAll(serverSelectorStrategy.pick(priorityServers, segment, numServersToPick - result.size()));
+      if (result.size() == numServersToPick) {
+        break;
+      }
     }
-
-    final Set<QueryableDruidServer> servers = priorityServers.getValue();
-    switch (servers.size()) {
-      case 0:
-        throw new ISE("[%s] Something hella weird going on here. We should not be here", segment.getIdentifier());
-      case 1:
-        return priorityServers.getValue().iterator().next();
-      default:
-        return serverSelectorStrategy.pick(servers, segment);
-    }
+    return result;
   }
 }

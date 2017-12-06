@@ -19,59 +19,48 @@
 
 package io.druid.query.aggregation;
 
+import com.fasterxml.jackson.annotation.JacksonInject;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.base.Preconditions;
-import com.google.common.primitives.Doubles;
-import com.metamx.common.StringUtils;
+import io.druid.java.util.common.StringUtils;
+import io.druid.math.expr.ExprMacroTable;
 import io.druid.segment.ColumnSelectorFactory;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
-import java.util.Comparator;
 import java.util.List;
 
 /**
  */
-public class DoubleSumAggregatorFactory extends AggregatorFactory
+public class DoubleSumAggregatorFactory extends SimpleDoubleAggregatorFactory
 {
-  private static final byte CACHE_TYPE_ID = 0x2;
-
-  private final String fieldName;
-  private final String name;
 
   @JsonCreator
   public DoubleSumAggregatorFactory(
       @JsonProperty("name") String name,
-      @JsonProperty("fieldName") final String fieldName
+      @JsonProperty("fieldName") String fieldName,
+      @JsonProperty("expression") String expression,
+      @JacksonInject ExprMacroTable macroTable
   )
   {
-    Preconditions.checkNotNull(name, "Must have a valid, non-null aggregator name");
-    Preconditions.checkNotNull(fieldName, "Must have a valid, non-null fieldName");
+    super(macroTable, fieldName, name, expression);
+  }
 
-    this.name = name;
-    this.fieldName = fieldName;
+  public DoubleSumAggregatorFactory(String name, String fieldName)
+  {
+    this(name, fieldName, null, ExprMacroTable.nil());
   }
 
   @Override
   public Aggregator factorize(ColumnSelectorFactory metricFactory)
   {
-    return new DoubleSumAggregator(
-        name,
-        metricFactory.makeFloatColumnSelector(fieldName)
-    );
+    return new DoubleSumAggregator(getDoubleColumnSelector(metricFactory, 0.0));
   }
 
   @Override
   public BufferAggregator factorizeBuffered(ColumnSelectorFactory metricFactory)
   {
-    return new DoubleSumBufferAggregator(metricFactory.makeFloatColumnSelector(fieldName));
-  }
-
-  @Override
-  public Comparator getComparator()
-  {
-    return DoubleSumAggregator.COMPARATOR;
+    return new DoubleSumBufferAggregator(getDoubleColumnSelector(metricFactory, 0.0));
   }
 
   @Override
@@ -81,86 +70,35 @@ public class DoubleSumAggregatorFactory extends AggregatorFactory
   }
 
   @Override
-  public AggregatorFactory getCombiningFactory()
+  public AggregateCombiner makeAggregateCombiner()
   {
-    return new DoubleSumAggregatorFactory(name, name);
+    return new DoubleSumAggregateCombiner();
   }
 
   @Override
-  public AggregatorFactory getMergingFactory(AggregatorFactory other) throws AggregatorFactoryNotMergeableException
+  public AggregatorFactory getCombiningFactory()
   {
-    if (other.getName().equals(this.getName()) && this.getClass() == other.getClass()) {
-      return getCombiningFactory();
-    } else {
-      throw new AggregatorFactoryNotMergeableException(this, other);
-    }
+    return new DoubleSumAggregatorFactory(name, name, null, macroTable);
   }
 
   @Override
   public List<AggregatorFactory> getRequiredColumns()
   {
-    return Arrays.<AggregatorFactory>asList(new DoubleSumAggregatorFactory(fieldName, fieldName));
-  }
-
-  @Override
-  public Object deserialize(Object object)
-  {
-    // handle "NaN" / "Infinity" values serialized as strings in JSON
-    if (object instanceof String) {
-      return Double.parseDouble((String) object);
-    }
-    return object;
-  }
-
-  @Override
-  public Object finalizeComputation(Object object)
-  {
-    return object;
-  }
-
-  @JsonProperty
-  public String getFieldName()
-  {
-    return fieldName;
-  }
-
-  @Override
-  @JsonProperty
-  public String getName()
-  {
-    return name;
-  }
-
-  @Override
-  public List<String> requiredFields()
-  {
-    return Arrays.asList(fieldName);
+    return Arrays.asList(new DoubleSumAggregatorFactory(fieldName, fieldName, expression, macroTable));
   }
 
   @Override
   public byte[] getCacheKey()
   {
-    byte[] fieldNameBytes = StringUtils.toUtf8(fieldName);
+    byte[] fieldNameBytes = StringUtils.toUtf8WithNullToEmpty(fieldName);
+    byte[] expressionBytes = StringUtils.toUtf8WithNullToEmpty(expression);
 
-    return ByteBuffer.allocate(1 + fieldNameBytes.length).put(CACHE_TYPE_ID).put(fieldNameBytes).array();
-  }
-
-  @Override
-  public String getTypeName()
-  {
-    return "float";
-  }
-
-  @Override
-  public int getMaxIntermediateSize()
-  {
-    return Doubles.BYTES;
-  }
-
-  @Override
-  public Object getAggregatorStartValue()
-  {
-    return 0;
+    return ByteBuffer.allocate(2 + fieldNameBytes.length + expressionBytes.length)
+                     .put(AggregatorUtil.DOUBLE_SUM_CACHE_TYPE_ID)
+                     .put(fieldNameBytes)
+                     .put(AggregatorUtil.STRING_SEPARATOR)
+                     .put(expressionBytes)
+                     .array();
   }
 
   @Override
@@ -168,37 +106,8 @@ public class DoubleSumAggregatorFactory extends AggregatorFactory
   {
     return "DoubleSumAggregatorFactory{" +
            "fieldName='" + fieldName + '\'' +
+           ", expression='" + expression + '\'' +
            ", name='" + name + '\'' +
            '}';
-  }
-
-  @Override
-  public boolean equals(Object o)
-  {
-    if (this == o) {
-      return true;
-    }
-    if (o == null || getClass() != o.getClass()) {
-      return false;
-    }
-
-    DoubleSumAggregatorFactory that = (DoubleSumAggregatorFactory) o;
-
-    if (fieldName != null ? !fieldName.equals(that.fieldName) : that.fieldName != null) {
-      return false;
-    }
-    if (name != null ? !name.equals(that.name) : that.name != null) {
-      return false;
-    }
-
-    return true;
-  }
-
-  @Override
-  public int hashCode()
-  {
-    int result = fieldName != null ? fieldName.hashCode() : 0;
-    result = 31 * result + (name != null ? name.hashCode() : 0);
-    return result;
   }
 }

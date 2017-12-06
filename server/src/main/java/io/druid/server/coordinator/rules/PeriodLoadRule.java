@@ -22,8 +22,9 @@ package io.druid.server.coordinator.rules;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableMap;
-import com.metamx.common.logger.Logger;
+
 import io.druid.client.DruidServer;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.timeline.DataSegment;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
@@ -87,7 +88,6 @@ public class PeriodLoadRule extends LoadRule
   @Override
   public boolean appliesTo(Interval interval, DateTime referenceTimestamp)
   {
-    final Interval currInterval = new Interval(period, referenceTimestamp);
-    return currInterval.overlaps(interval) && interval.getStartMillis() >= currInterval.getStartMillis();
+    return Rules.eligibleForLoad(period, interval, referenceTimestamp);
   }
 }

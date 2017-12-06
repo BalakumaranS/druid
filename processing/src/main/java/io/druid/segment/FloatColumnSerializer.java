@@ -19,9 +19,12 @@
 
 package io.druid.segment;
 
-import io.druid.segment.data.CompressedFloatsSupplierSerializer;
-import io.druid.segment.data.CompressedObjectStrategy;
-import io.druid.segment.data.IOPeon;
+import io.druid.java.util.common.StringUtils;
+import io.druid.java.util.common.io.smoosh.FileSmoosher;
+import io.druid.segment.writeout.SegmentWriteOutMedium;
+import io.druid.segment.data.CompressionFactory;
+import io.druid.segment.data.CompressionStrategy;
+import io.druid.segment.data.FloatSupplierSerializer;
 
 import java.io.IOException;
 import java.nio.ByteOrder;
@@ -30,28 +33,28 @@ import java.nio.channels.WritableByteChannel;
 public class FloatColumnSerializer implements GenericColumnSerializer
 {
   public static FloatColumnSerializer create(
-      IOPeon ioPeon,
+      SegmentWriteOutMedium segmentWriteOutMedium,
       String filenameBase,
-      CompressedObjectStrategy.CompressionStrategy compression
+      CompressionStrategy compression
   )
   {
-    return new FloatColumnSerializer(ioPeon, filenameBase, IndexIO.BYTE_ORDER, compression);
+    return new FloatColumnSerializer(segmentWriteOutMedium, filenameBase, IndexIO.BYTE_ORDER, compression);
   }
 
-  private final IOPeon ioPeon;
+  private final SegmentWriteOutMedium segmentWriteOutMedium;
   private final String filenameBase;
   private final ByteOrder byteOrder;
-  private final CompressedObjectStrategy.CompressionStrategy compression;
-  private CompressedFloatsSupplierSerializer writer;
+  private final CompressionStrategy compression;
+  private FloatSupplierSerializer writer;
 
-  public FloatColumnSerializer(
-      IOPeon ioPeon,
+  private FloatColumnSerializer(
+      SegmentWriteOutMedium segmentWriteOutMedium,
       String filenameBase,
       ByteOrder byteOrder,
-      CompressedObjectStrategy.CompressionStrategy compression
+      CompressionStrategy compression
   )
   {
-    this.ioPeon = ioPeon;
+    this.segmentWriteOutMedium = segmentWriteOutMedium;
     this.filenameBase = filenameBase;
     this.byteOrder = byteOrder;
     this.compression = compression;
@@ -60,9 +63,9 @@ public class FloatColumnSerializer implements GenericColumnSerializer
   @Override
   public void open() throws IOException
   {
-    writer = CompressedFloatsSupplierSerializer.create(
-        ioPeon,
-        String.format("%s.float_column", filenameBase),
+    writer = CompressionFactory.getFloatSerializer(
+        segmentWriteOutMedium,
+        StringUtils.format("%s.float_column", filenameBase),
         byteOrder,
         compression
     );
@@ -77,21 +80,14 @@ public class FloatColumnSerializer implements GenericColumnSerializer
   }
 
   @Override
-  public void close() throws IOException
-  {
-    writer.close();
-  }
-
-  @Override
-  public long getSerializedSize()
+  public long getSerializedSize() throws IOException
   {
     return writer.getSerializedSize();
   }
 
   @Override
-  public void writeToChannel(WritableByteChannel channel) throws IOException
+  public void writeTo(WritableByteChannel channel, FileSmoosher smoosher) throws IOException
   {
-    writer.writeToChannel(channel);
+    writer.writeTo(channel, smoosher);
   }
-
 }

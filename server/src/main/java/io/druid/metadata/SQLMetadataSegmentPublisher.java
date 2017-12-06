@@ -1,5 +1,3 @@
-
-
 /*
  * Licensed to Metamarkets Group Inc. (Metamarkets) under one
  * or more contributor license agreements. See the NOTICE file
@@ -22,11 +20,13 @@
 package io.druid.metadata;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.inject.Inject;
-import com.metamx.common.logger.Logger;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.StringUtils;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.timeline.DataSegment;
 import io.druid.timeline.partition.NoneShardSpec;
-import org.joda.time.DateTime;
 import org.skife.jdbi.v2.DBI;
 import org.skife.jdbi.v2.Handle;
 import org.skife.jdbi.v2.tweak.HandleCallback;
@@ -54,15 +54,41 @@ public class SQLMetadataSegmentPublisher implements MetadataSegmentPublisher
     this.jsonMapper = jsonMapper;
     this.config = config;
     this.connector = connector;
-    this.statement = String.format(
-        "INSERT INTO %s (id, dataSource, created_date, start, \"end\", partitioned, version, used, payload) "
+    this.statement = StringUtils.format(
+        "INSERT INTO %1$s (id, dataSource, created_date, start, %2$send%2$s, partitioned, version, used, payload) "
         + "VALUES (:id, :dataSource, :created_date, :start, :end, :partitioned, :version, :used, :payload)",
-        config.getSegmentsTable()
+        config.getSegmentsTable(), connector.getQuoteString()
     );
   }
 
   @Override
   public void publishSegment(final DataSegment segment) throws IOException
+  {
+    publishSegment(
+        segment.getIdentifier(),
+        segment.getDataSource(),
+        DateTimes.nowUtc().toString(),
+        segment.getInterval().getStart().toString(),
+        segment.getInterval().getEnd().toString(),
+        (segment.getShardSpec() instanceof NoneShardSpec) ? false : true,
+        segment.getVersion(),
+        true,
+        jsonMapper.writeValueAsBytes(segment)
+    );
+  }
+
+  @VisibleForTesting
+  void publishSegment(
+      final String identifier,
+      final String dataSource,
+      final String createdDate,
+      final String start,
+      final String end,
+      final boolean partitioned,
+      final String version,
+      final boolean used,
+      final byte[] payload
+  )
   {
     try {
       final DBI dbi = connector.getDBI();
@@ -73,16 +99,16 @@ public class SQLMetadataSegmentPublisher implements MetadataSegmentPublisher
             public List<Map<String, Object>> withHandle(Handle handle) throws Exception
             {
               return handle.createQuery(
-                  String.format("SELECT id FROM %s WHERE id=:id", config.getSegmentsTable())
+                  StringUtils.format("SELECT id FROM %s WHERE id=:id", config.getSegmentsTable())
               )
-                           .bind("id", segment.getIdentifier())
+                           .bind("id", identifier)
                            .list();
             }
           }
       );
 
       if (!exists.isEmpty()) {
-        log.info("Found [%s] in DB, not updating DB", segment.getIdentifier());
+        log.info("Found [%s] in DB, not updating DB", identifier);
         return;
       }
 
@@ -93,15 +119,15 @@ public class SQLMetadataSegmentPublisher implements MetadataSegmentPublisher
             public Void withHandle(Handle handle) throws Exception
             {
               handle.createStatement(statement)
-                    .bind("id", segment.getIdentifier())
-                    .bind("dataSource", segment.getDataSource())
-                    .bind("created_date", new DateTime().toString())
-                    .bind("start", segment.getInterval().getStart().toString())
-                    .bind("end", segment.getInterval().getEnd().toString())
-                    .bind("partitioned", (segment.getShardSpec() instanceof NoneShardSpec) ? false : true)
-                    .bind("version", segment.getVersion())
-                    .bind("used", true)
-                    .bind("payload", jsonMapper.writeValueAsBytes(segment))
+                    .bind("id", identifier)
+                    .bind("dataSource", dataSource)
+                    .bind("created_date", createdDate)
+                    .bind("start", start)
+                    .bind("end", end)
+                    .bind("partitioned", partitioned)
+                    .bind("version", version)
+                    .bind("used", used)
+                    .bind("payload", payload)
                     .execute();
 
               return null;

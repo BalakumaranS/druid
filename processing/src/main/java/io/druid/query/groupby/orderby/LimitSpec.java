@@ -22,12 +22,14 @@ package io.druid.query.groupby.orderby;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.google.common.base.Function;
-import com.metamx.common.guava.Sequence;
 import io.druid.data.input.Row;
+import io.druid.java.util.common.Cacheable;
+import io.druid.java.util.common.guava.Sequence;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.PostAggregator;
 import io.druid.query.dimension.DimensionSpec;
 
+import javax.annotation.Nullable;
 import java.util.List;
 
 /**
@@ -36,15 +38,27 @@ import java.util.List;
 @JsonSubTypes(value = {
     @JsonSubTypes.Type(name = "default", value = DefaultLimitSpec.class)
 })
-public interface LimitSpec
+public interface LimitSpec extends Cacheable
 {
-  public Function<Sequence<Row>, Sequence<Row>> build(
+  static LimitSpec nullToNoopLimitSpec(@Nullable LimitSpec limitSpec)
+  {
+    return (limitSpec == null) ? NoopLimitSpec.instance() : limitSpec;
+  }
+
+  /**
+   * Returns a function that applies a limit to an input sequence that is assumed to be sorted on dimensions.
+   *
+   * @param dimensions query dimensions
+   * @param aggs       query aggregators
+   * @param postAggs   query postAggregators
+   *
+   * @return limit function
+   */
+  Function<Sequence<Row>, Sequence<Row>> build(
       List<DimensionSpec> dimensions,
       List<AggregatorFactory> aggs,
       List<PostAggregator> postAggs
   );
 
-  public LimitSpec merge(LimitSpec other);
-
-  public byte[] getCacheKey();
+  LimitSpec merge(LimitSpec other);
 }

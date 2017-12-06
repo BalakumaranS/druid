@@ -21,17 +21,19 @@ package io.druid.server.coordinator;
 
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import com.metamx.common.guava.Comparators;
 import com.metamx.emitter.service.ServiceEmitter;
-import io.druid.client.DruidDataSource;
+import io.druid.client.ImmutableDruidDataSource;
+import io.druid.java.util.common.DateTimes;
 import io.druid.metadata.MetadataRuleManager;
 import io.druid.timeline.DataSegment;
 import org.joda.time.DateTime;
 
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
  */
@@ -41,7 +43,7 @@ public class DruidCoordinatorRuntimeParams
   private final DruidCluster druidCluster;
   private final MetadataRuleManager databaseRuleManager;
   private final SegmentReplicantLookup segmentReplicantLookup;
-  private final Set<DruidDataSource> dataSources;
+  private final Set<ImmutableDruidDataSource> dataSources;
   private final Set<DataSegment> availableSegments;
   private final Map<String, LoadQueuePeon> loadManagementPeons;
   private final ReplicationThrottler replicationManager;
@@ -49,14 +51,14 @@ public class DruidCoordinatorRuntimeParams
   private final CoordinatorDynamicConfig coordinatorDynamicConfig;
   private final CoordinatorStats stats;
   private final DateTime balancerReferenceTimestamp;
-  private final BalancerStrategyFactory strategyFactory;
+  private final BalancerStrategy balancerStrategy;
 
-  public DruidCoordinatorRuntimeParams(
+  private DruidCoordinatorRuntimeParams(
       long startTime,
       DruidCluster druidCluster,
       MetadataRuleManager databaseRuleManager,
       SegmentReplicantLookup segmentReplicantLookup,
-      Set<DruidDataSource> dataSources,
+      Set<ImmutableDruidDataSource> dataSources,
       Set<DataSegment> availableSegments,
       Map<String, LoadQueuePeon> loadManagementPeons,
       ReplicationThrottler replicationManager,
@@ -64,7 +66,7 @@ public class DruidCoordinatorRuntimeParams
       CoordinatorDynamicConfig coordinatorDynamicConfig,
       CoordinatorStats stats,
       DateTime balancerReferenceTimestamp,
-      BalancerStrategyFactory strategyFactory
+      BalancerStrategy balancerStrategy
   )
   {
     this.startTime = startTime;
@@ -79,7 +81,7 @@ public class DruidCoordinatorRuntimeParams
     this.coordinatorDynamicConfig = coordinatorDynamicConfig;
     this.stats = stats;
     this.balancerReferenceTimestamp = balancerReferenceTimestamp;
-    this.strategyFactory = strategyFactory;
+    this.balancerStrategy = balancerStrategy;
   }
 
   public long getStartTime()
@@ -102,7 +104,7 @@ public class DruidCoordinatorRuntimeParams
     return segmentReplicantLookup;
   }
 
-  public Set<DruidDataSource> getDataSources()
+  public Set<ImmutableDruidDataSource> getDataSources()
   {
     return dataSources;
   }
@@ -142,9 +144,9 @@ public class DruidCoordinatorRuntimeParams
     return balancerReferenceTimestamp;
   }
 
-  public BalancerStrategyFactory getBalancerStrategyFactory()
+  public BalancerStrategy getBalancerStrategy()
   {
-    return strategyFactory;
+    return balancerStrategy;
   }
 
   public boolean hasDeletionWaitTimeElapsed()
@@ -172,7 +174,26 @@ public class DruidCoordinatorRuntimeParams
         coordinatorDynamicConfig,
         stats,
         balancerReferenceTimestamp,
-        strategyFactory
+        balancerStrategy
+    );
+  }
+
+  public Builder buildFromExistingWithoutAvailableSegments()
+  {
+    return new Builder(
+        startTime,
+        druidCluster,
+        databaseRuleManager,
+        segmentReplicantLookup,
+        dataSources,
+        Sets.newTreeSet(DruidCoordinator.SEGMENT_COMPARATOR),
+        loadManagementPeons,
+        replicationManager,
+        emitter,
+        coordinatorDynamicConfig,
+        stats,
+        balancerReferenceTimestamp,
+        balancerStrategy
     );
   }
 
@@ -182,7 +203,7 @@ public class DruidCoordinatorRuntimeParams
     private DruidCluster druidCluster;
     private MetadataRuleManager databaseRuleManager;
     private SegmentReplicantLookup segmentReplicantLookup;
-    private final Set<DruidDataSource> dataSources;
+    private final Set<ImmutableDruidDataSource> dataSources;
     private final Set<DataSegment> availableSegments;
     private final Map<String, LoadQueuePeon> loadManagementPeons;
     private ReplicationThrottler replicationManager;
@@ -190,7 +211,7 @@ public class DruidCoordinatorRuntimeParams
     private CoordinatorDynamicConfig coordinatorDynamicConfig;
     private CoordinatorStats stats;
     private DateTime balancerReferenceTimestamp;
-    private BalancerStrategyFactory strategyFactory;
+    private BalancerStrategy balancerStrategy;
 
     Builder()
     {
@@ -198,15 +219,14 @@ public class DruidCoordinatorRuntimeParams
       this.druidCluster = null;
       this.databaseRuleManager = null;
       this.segmentReplicantLookup = null;
-      this.dataSources = Sets.newHashSet();
-      this.availableSegments = Sets.newTreeSet(DruidCoordinator.SEGMENT_COMPARATOR);
+      this.dataSources = new HashSet<>();
+      this.availableSegments = new TreeSet<>(DruidCoordinator.SEGMENT_COMPARATOR);
       this.loadManagementPeons = Maps.newHashMap();
       this.replicationManager = null;
       this.emitter = null;
       this.stats = new CoordinatorStats();
       this.coordinatorDynamicConfig = new CoordinatorDynamicConfig.Builder().build();
-      this.balancerReferenceTimestamp = DateTime.now();
-      this.strategyFactory = new CostBalancerStrategyFactory(1);
+      this.balancerReferenceTimestamp = DateTimes.nowUtc();
     }
 
     Builder(
@@ -214,7 +234,7 @@ public class DruidCoordinatorRuntimeParams
         DruidCluster cluster,
         MetadataRuleManager databaseRuleManager,
         SegmentReplicantLookup segmentReplicantLookup,
-        Set<DruidDataSource> dataSources,
+        Set<ImmutableDruidDataSource> dataSources,
         Set<DataSegment> availableSegments,
         Map<String, LoadQueuePeon> loadManagementPeons,
         ReplicationThrottler replicationManager,
@@ -222,7 +242,7 @@ public class DruidCoordinatorRuntimeParams
         CoordinatorDynamicConfig coordinatorDynamicConfig,
         CoordinatorStats stats,
         DateTime balancerReferenceTimestamp,
-        BalancerStrategyFactory strategyFactory
+        BalancerStrategy balancerStrategy
     )
     {
       this.startTime = startTime;
@@ -237,7 +257,7 @@ public class DruidCoordinatorRuntimeParams
       this.coordinatorDynamicConfig = coordinatorDynamicConfig;
       this.stats = stats;
       this.balancerReferenceTimestamp = balancerReferenceTimestamp;
-      this.strategyFactory=strategyFactory;
+      this.balancerStrategy = balancerStrategy;
     }
 
     public DruidCoordinatorRuntimeParams build()
@@ -255,7 +275,7 @@ public class DruidCoordinatorRuntimeParams
           coordinatorDynamicConfig,
           stats,
           balancerReferenceTimestamp,
-          strategyFactory
+          balancerStrategy
       );
     }
 
@@ -283,7 +303,7 @@ public class DruidCoordinatorRuntimeParams
       return this;
     }
 
-    public Builder withDatasources(Collection<DruidDataSource> dataSourcesCollection)
+    public Builder withDatasources(Collection<ImmutableDruidDataSource> dataSourcesCollection)
     {
       dataSources.addAll(Collections.unmodifiableCollection(dataSourcesCollection));
       return this;
@@ -331,9 +351,9 @@ public class DruidCoordinatorRuntimeParams
       return this;
     }
 
-    public Builder withBalancerStrategyFactory(BalancerStrategyFactory strategyFactory)
+    public Builder withBalancerStrategy(BalancerStrategy balancerStrategy)
     {
-      this.strategyFactory=strategyFactory;
+      this.balancerStrategy = balancerStrategy;
       return this;
     }
   }

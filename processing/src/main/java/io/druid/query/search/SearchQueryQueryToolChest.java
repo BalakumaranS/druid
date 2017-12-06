@@ -20,25 +20,27 @@
 package io.druid.query.search;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.base.Functions;
-import com.google.common.collect.ImmutableList;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import com.google.common.collect.Ordering;
 import com.google.common.primitives.Ints;
 import com.google.inject.Inject;
-import com.metamx.common.IAE;
-import com.metamx.common.ISE;
-import com.metamx.common.guava.Sequence;
-import com.metamx.common.guava.Sequences;
-import com.metamx.common.guava.nary.BinaryFn;
-import com.metamx.emitter.service.ServiceMetricEvent;
-import io.druid.query.BaseQuery;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.IAE;
+import io.druid.java.util.common.ISE;
+import io.druid.java.util.common.guava.Sequence;
+import io.druid.java.util.common.guava.Sequences;
+import io.druid.java.util.common.guava.nary.BinaryFn;
 import io.druid.query.CacheStrategy;
-import io.druid.query.DruidMetrics;
 import io.druid.query.IntervalChunkingQueryRunnerDecorator;
 import io.druid.query.Query;
+import io.druid.query.QueryContexts;
+import io.druid.query.QueryPlus;
 import io.druid.query.QueryRunner;
 import io.druid.query.QueryToolChest;
 import io.druid.query.Result;
@@ -47,14 +49,10 @@ import io.druid.query.ResultMergeQueryRunner;
 import io.druid.query.aggregation.MetricManipulationFn;
 import io.druid.query.dimension.DimensionSpec;
 import io.druid.query.filter.DimFilter;
-import io.druid.query.search.search.SearchHit;
-import io.druid.query.search.search.SearchQuery;
-import io.druid.query.search.search.SearchQueryConfig;
-import org.joda.time.DateTime;
 
 import javax.annotation.Nullable;
 import java.nio.ByteBuffer;
-import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -62,7 +60,7 @@ import java.util.Map;
  */
 public class SearchQueryQueryToolChest extends QueryToolChest<Result<SearchResultValue>, SearchQuery>
 {
-  private static final byte SEARCH_QUERY = 0x2;
+  private static final byte SEARCH_QUERY = 0x15;
   private static final TypeReference<Result<SearchResultValue>> TYPE_REFERENCE = new TypeReference<Result<SearchResultValue>>()
   {
   };
@@ -71,17 +69,28 @@ public class SearchQueryQueryToolChest extends QueryToolChest<Result<SearchResul
   };
 
   private final SearchQueryConfig config;
-
   private final IntervalChunkingQueryRunnerDecorator intervalChunkingQueryRunnerDecorator;
+  private final SearchQueryMetricsFactory queryMetricsFactory;
 
-  @Inject
+  @VisibleForTesting
   public SearchQueryQueryToolChest(
       SearchQueryConfig config,
       IntervalChunkingQueryRunnerDecorator intervalChunkingQueryRunnerDecorator
   )
   {
+    this(config, intervalChunkingQueryRunnerDecorator, DefaultSearchQueryMetricsFactory.instance());
+  }
+
+  @Inject
+  public SearchQueryQueryToolChest(
+      SearchQueryConfig config,
+      IntervalChunkingQueryRunnerDecorator intervalChunkingQueryRunnerDecorator,
+      SearchQueryMetricsFactory queryMetricsFactory
+  )
+  {
     this.config = config;
     this.intervalChunkingQueryRunnerDecorator = intervalChunkingQueryRunnerDecorator;
+    this.queryMetricsFactory = queryMetricsFactory;
   }
 
   @Override
@@ -112,9 +121,11 @@ public class SearchQueryQueryToolChest extends QueryToolChest<Result<SearchResul
   }
 
   @Override
-  public ServiceMetricEvent.Builder makeMetricBuilder(SearchQuery query)
+  public SearchQueryMetrics makeMetrics(SearchQuery query)
   {
-    return DruidMetrics.makePartialQueryTimeMetric(query);
+    SearchQueryMetrics metrics = queryMetricsFactory.makeMetrics(query);
+    metrics.query(query);
+    return metrics;
   }
 
   @Override
@@ -132,41 +143,54 @@ public class SearchQueryQueryToolChest extends QueryToolChest<Result<SearchResul
   }
 
   @Override
-  public CacheStrategy<Result<SearchResultValue>, Object, SearchQuery> getCacheStrategy(SearchQuery query)
+  public CacheStrategy<Result<SearchResultValue>, Object, SearchQuery> getCacheStrategy(final SearchQuery query)
   {
+
     return new CacheStrategy<Result<SearchResultValue>, Object, SearchQuery>()
     {
+      private final List<DimensionSpec> dimensionSpecs =
+          query.getDimensions() != null ? query.getDimensions() : Collections.<DimensionSpec>emptyList();
+      private final List<String> dimOutputNames = dimensionSpecs.size() > 0 ?
+          Lists.transform(dimensionSpecs, DimensionSpec::getOutputName) : Collections.emptyList();
+
+      @Override
+      public boolean isCacheable(SearchQuery query, boolean willMergeRunners)
+      {
+        return true;
+      }
+
       @Override
       public byte[] computeCacheKey(SearchQuery query)
       {
         final DimFilter dimFilter = query.getDimensionsFilter();
         final byte[] filterBytes = dimFilter == null ? new byte[]{} : dimFilter.getCacheKey();
         final byte[] querySpecBytes = query.getQuery().getCacheKey();
-        final byte[] granularityBytes = query.getGranularity().cacheKey();
+        final byte[] granularityBytes = query.getGranularity().getCacheKey();
 
-        final Collection<DimensionSpec> dimensions = query.getDimensions() == null
-                                                     ? ImmutableList.<DimensionSpec>of()
-                                                     : query.getDimensions();
-
-        final byte[][] dimensionsBytes = new byte[dimensions.size()][];
+        final List<DimensionSpec> dimensionSpecs =
+            query.getDimensions() != null ? query.getDimensions() : Collections.<DimensionSpec>emptyList();
+        final byte[][] dimensionsBytes = new byte[dimensionSpecs.size()][];
         int dimensionsBytesSize = 0;
         int index = 0;
-        for (DimensionSpec dimension : dimensions) {
-          dimensionsBytes[index] = dimension.getCacheKey();
+        for (DimensionSpec dimensionSpec : dimensionSpecs) {
+          dimensionsBytes[index] = dimensionSpec.getCacheKey();
           dimensionsBytesSize += dimensionsBytes[index].length;
           ++index;
         }
 
+        final byte[] sortSpecBytes = query.getSort().getCacheKey();
+
         final ByteBuffer queryCacheKey = ByteBuffer
             .allocate(
                 1 + 4 + granularityBytes.length + filterBytes.length +
-                querySpecBytes.length + dimensionsBytesSize
+                querySpecBytes.length + dimensionsBytesSize + sortSpecBytes.length
             )
             .put(SEARCH_QUERY)
             .put(Ints.toByteArray(query.getLimit()))
             .put(granularityBytes)
             .put(filterBytes)
-            .put(querySpecBytes);
+            .put(querySpecBytes)
+            .put(sortSpecBytes);
 
         for (byte[] bytes : dimensionsBytes) {
           queryCacheKey.put(bytes);
@@ -189,7 +213,9 @@ public class SearchQueryQueryToolChest extends QueryToolChest<Result<SearchResul
           @Override
           public Object apply(Result<SearchResultValue> input)
           {
-            return Lists.newArrayList(input.getTimestamp().getMillis(), input.getValue());
+            return dimensionSpecs.size() > 0
+                ? Lists.newArrayList(input.getTimestamp().getMillis(), input.getValue(), dimOutputNames)
+                : Lists.newArrayList(input.getTimestamp().getMillis(), input.getValue());
           }
         };
       }
@@ -204,43 +230,122 @@ public class SearchQueryQueryToolChest extends QueryToolChest<Result<SearchResul
           public Result<SearchResultValue> apply(Object input)
           {
             List<Object> result = (List<Object>) input;
+            boolean needsRename = false;
+            final Map<String, String> outputNameMap = Maps.newHashMap();
+            if (hasOutputName(result)) {
+              List<String> cachedOutputNames = (List) result.get(2);
+              Preconditions.checkArgument(cachedOutputNames.size() == dimOutputNames.size(),
+                  "cache hit, but number of dimensions mismatch");
+              needsRename = false;
+              for (int idx = 0; idx < cachedOutputNames.size(); idx++) {
+                String cachedOutputName = cachedOutputNames.get(idx);
+                String outputName = dimOutputNames.get(idx);
+                if (!cachedOutputName.equals(outputName)) {
+                  needsRename = true;
+                }
+                outputNameMap.put(cachedOutputName, outputName);
+              }
+            }
 
-            return new Result<>(
-                new DateTime(((Number) result.get(0)).longValue()),
-                new SearchResultValue(
-                    Lists.transform(
-                        (List) result.get(1),
-                        new Function<Object, SearchHit>()
-                        {
-                          @Override
-                          public SearchHit apply(@Nullable Object input)
-                          {
-                            if (input instanceof Map) {
-                              return new SearchHit(
-                                  (String) ((Map) input).get("dimension"),
-                                  (String) ((Map) input).get("value")
-                              );
-                            } else if (input instanceof SearchHit) {
-                              return (SearchHit) input;
-                            } else {
-                              throw new IAE("Unknown format [%s]", input.getClass());
+            return !needsRename
+                ? new Result<>(
+                    DateTimes.utc(((Number) result.get(0)).longValue()),
+                    new SearchResultValue(
+                        Lists.transform(
+                            (List) result.get(1),
+                            new Function<Object, SearchHit>()
+                            {
+                              @Override
+                              public SearchHit apply(@Nullable Object input)
+                              {
+                                if (input instanceof Map) {
+                                  return new SearchHit(
+                                      (String) ((Map) input).get("dimension"),
+                                      (String) ((Map) input).get("value"),
+                                      (Integer) ((Map) input).get("count")
+                                  );
+                                } else if (input instanceof SearchHit) {
+                                  return (SearchHit) input;
+                                } else {
+                                  throw new IAE("Unknown format [%s]", input.getClass());
+                                }
+                              }
                             }
-                          }
-                        }
+                        )
                     )
                 )
-            );
+                : new Result<>(
+                    DateTimes.utc(((Number) result.get(0)).longValue()),
+                    new SearchResultValue(
+                        Lists.transform(
+                            (List) result.get(1),
+                            new Function<Object, SearchHit>()
+                            {
+                              @Override
+                              public SearchHit apply(@Nullable Object input)
+                              {
+                                String dim = null;
+                                String val = null;
+                                Integer cnt = null;
+                                if (input instanceof Map) {
+                                  dim = outputNameMap.get((String) ((Map) input).get("dimension"));
+                                  val = (String) ((Map) input).get("value");
+                                  cnt = (Integer) ((Map) input).get("count");
+                                } else if (input instanceof SearchHit) {
+                                  SearchHit cached = (SearchHit) input;
+                                  dim = outputNameMap.get(cached.getDimension());
+                                  val = cached.getValue();
+                                  cnt = cached.getCount();
+                                } else {
+                                  throw new IAE("Unknown format [%s]", input.getClass());
+                                }
+                                return new SearchHit(dim, val, cnt);
+                              }
+                            }
+                        )
+                    )
+                );
           }
         };
+      }
+
+      private boolean hasOutputName(List<Object> cachedEntry)
+      {
+        /*
+         * cached entry is list of two or three objects
+         *  1. timestamp
+         *  2. SearchResultValue
+         *  3. outputName of each dimension (optional)
+         *
+         * if a cached entry has three objects, dimension name of SearchResultValue should be check if rename is needed
+         */
+        return cachedEntry.size() == 3;
       }
     };
   }
 
   @Override
-  public QueryRunner<Result<SearchResultValue>> preMergeQueryDecoration(QueryRunner<Result<SearchResultValue>> runner)
+  public QueryRunner<Result<SearchResultValue>> preMergeQueryDecoration(final QueryRunner<Result<SearchResultValue>> runner)
   {
     return new SearchThresholdAdjustingQueryRunner(
-        intervalChunkingQueryRunnerDecorator.decorate(runner, this),
+        intervalChunkingQueryRunnerDecorator.decorate(
+            new QueryRunner<Result<SearchResultValue>>()
+            {
+              @Override
+              public Sequence<Result<SearchResultValue>> run(
+                  QueryPlus<Result<SearchResultValue>> queryPlus, Map<String, Object> responseContext
+              )
+              {
+                SearchQuery searchQuery = (SearchQuery) queryPlus.getQuery();
+                if (searchQuery.getDimensionsFilter() != null) {
+                  searchQuery = searchQuery.withDimFilter(searchQuery.getDimensionsFilter().optimize());
+                  queryPlus = queryPlus.withQuery(searchQuery);
+                }
+                return runner.run(queryPlus, responseContext);
+              }
+            },
+            this
+        ),
         config
     );
   }
@@ -261,23 +366,24 @@ public class SearchQueryQueryToolChest extends QueryToolChest<Result<SearchResul
 
     @Override
     public Sequence<Result<SearchResultValue>> run(
-        Query<Result<SearchResultValue>> input,
+        QueryPlus<Result<SearchResultValue>> queryPlus,
         Map<String, Object> responseContext
     )
     {
+      Query<Result<SearchResultValue>> input = queryPlus.getQuery();
       if (!(input instanceof SearchQuery)) {
         throw new ISE("Can only handle [%s], got [%s]", SearchQuery.class, input.getClass());
       }
 
       final SearchQuery query = (SearchQuery) input;
       if (query.getLimit() < config.getMaxSearchLimit()) {
-        return runner.run(query, responseContext);
+        return runner.run(queryPlus, responseContext);
       }
 
-      final boolean isBySegment = BaseQuery.getContextBySegment(query, false);
+      final boolean isBySegment = QueryContexts.isBySegment(query);
 
       return Sequences.map(
-          runner.run(query.withLimit(config.getMaxSearchLimit()), responseContext),
+          runner.run(queryPlus.withQuery(query.withLimit(config.getMaxSearchLimit())), responseContext),
           new Function<Result<SearchResultValue>, Result<SearchResultValue>>()
           {
             @Override

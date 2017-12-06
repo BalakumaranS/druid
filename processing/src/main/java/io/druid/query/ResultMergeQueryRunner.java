@@ -20,14 +20,16 @@
 package io.druid.query;
 
 import com.google.common.collect.Ordering;
-import com.metamx.common.guava.Sequence;
-import com.metamx.common.guava.nary.BinaryFn;
 import io.druid.common.guava.CombiningSequence;
+import io.druid.guice.annotations.PublicApi;
+import io.druid.java.util.common.guava.Sequence;
+import io.druid.java.util.common.guava.nary.BinaryFn;
 
 import java.util.Map;
 
 /**
  */
+@PublicApi
 public abstract class ResultMergeQueryRunner<T> extends BySegmentSkippingQueryRunner<T>
 {
   public ResultMergeQueryRunner(
@@ -38,12 +40,13 @@ public abstract class ResultMergeQueryRunner<T> extends BySegmentSkippingQueryRu
   }
 
   @Override
-  public Sequence<T> doRun(QueryRunner<T> baseRunner, Query<T> query, Map<String, Object> context)
+  public Sequence<T> doRun(QueryRunner<T> baseRunner, QueryPlus<T> queryPlus, Map<String, Object> context)
   {
-    return CombiningSequence.create(baseRunner.run(query, context), makeOrdering(query), createMergeFn(query));
+    Query<T> query = queryPlus.getQuery();
+    return CombiningSequence.create(baseRunner.run(queryPlus, context), makeOrdering(query), createMergeFn(query));
   }
 
   protected abstract Ordering<T> makeOrdering(Query<T> query);
 
-  protected abstract BinaryFn<T,T,T> createMergeFn(Query<T> query);
+  protected abstract BinaryFn<T, T, T> createMergeFn(Query<T> query);
 }

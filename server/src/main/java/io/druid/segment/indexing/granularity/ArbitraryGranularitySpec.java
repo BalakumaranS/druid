@@ -22,14 +22,16 @@ package io.druid.segment.indexing.granularity;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Optional;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
 import com.google.common.collect.PeekingIterator;
 import com.google.common.collect.Sets;
-import com.metamx.common.Granularity;
-import com.metamx.common.guava.Comparators;
-import io.druid.common.utils.JodaUtils;
-import io.druid.granularity.QueryGranularity;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.IAE;
+import io.druid.java.util.common.granularity.Granularities;
+import io.druid.java.util.common.granularity.Granularity;
+import io.druid.java.util.common.guava.Comparators;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
 
@@ -40,15 +42,18 @@ import java.util.TreeSet;
 public class ArbitraryGranularitySpec implements GranularitySpec
 {
   private final TreeSet<Interval> intervals;
-  private final QueryGranularity queryGranularity;
+  private final Granularity queryGranularity;
+  private final Boolean rollup;
 
   @JsonCreator
   public ArbitraryGranularitySpec(
-      @JsonProperty("queryGranularity") QueryGranularity queryGranularity,
+      @JsonProperty("queryGranularity") Granularity queryGranularity,
+      @JsonProperty("rollup") Boolean rollup,
       @JsonProperty("intervals") List<Interval> inputIntervals
   )
   {
-    this.queryGranularity = queryGranularity;
+    this.queryGranularity = queryGranularity == null ? Granularities.NONE : queryGranularity;
+    this.rollup = rollup == null ? Boolean.TRUE : rollup;
     this.intervals = Sets.newTreeSet(Comparators.intervalsByStartThenEnd());
 
     if (inputIntervals == null) {
@@ -68,30 +73,38 @@ public class ArbitraryGranularitySpec implements GranularitySpec
       if (intervalIterator.hasNext()) {
         final Interval nextInterval = intervalIterator.peek();
         if (currentInterval.overlaps(nextInterval)) {
-          throw new IllegalArgumentException(
-              String.format(
-                  "Overlapping intervals: %s, %s",
-                  currentInterval,
-                  nextInterval
-              )
-          );
+          throw new IAE("Overlapping intervals: %s, %s", currentInterval, nextInterval);
         }
       }
     }
+  }
+
+  public ArbitraryGranularitySpec(
+      Granularity queryGranularity,
+      List<Interval> inputIntervals
+  )
+  {
+    this(queryGranularity, true, inputIntervals);
   }
 
   @Override
   @JsonProperty("intervals")
   public Optional<SortedSet<Interval>> bucketIntervals()
   {
-    return Optional.of((SortedSet<Interval>) intervals);
+    return Optional.<SortedSet<Interval>>of(intervals);
+  }
+
+  @Override
+  public List<Interval> inputIntervals()
+  {
+    return ImmutableList.copyOf(intervals);
   }
 
   @Override
   public Optional<Interval> bucketInterval(DateTime dt)
   {
     // First interval with start time ≤ dt
-    final Interval interval = intervals.floor(new Interval(dt, new DateTime(JodaUtils.MAX_INSTANT)));
+    final Interval interval = intervals.floor(new Interval(dt, DateTimes.MAX));
 
     if (interval != null && interval.contains(dt)) {
       return Optional.of(interval);
@@ -107,8 +120,15 @@ public class ArbitraryGranularitySpec implements GranularitySpec
   }
 
   @Override
+  @JsonProperty("rollup")
+  public boolean isRollup()
+  {
+    return rollup;
+  }
+
+  @Override
   @JsonProperty("queryGranularity")
-  public QueryGranularity getQueryGranularity()
+  public Granularity getQueryGranularity()
   {
     return queryGranularity;
   }
@@ -128,6 +148,10 @@ public class ArbitraryGranularitySpec implements GranularitySpec
     if (!intervals.equals(that.intervals)) {
       return false;
     }
+    if (!rollup.equals(that.rollup)) {
+      return false;
+    }
+
     return !(queryGranularity != null
              ? !queryGranularity.equals(that.queryGranularity)
              : that.queryGranularity != null);
@@ -138,7 +162,24 @@ public class ArbitraryGranularitySpec implements GranularitySpec
   public int hashCode()
   {
     int result = intervals.hashCode();
+    result = 31 * result + rollup.hashCode();
     result = 31 * result + (queryGranularity != null ? queryGranularity.hashCode() : 0);
     return result;
+  }
+
+  @Override
+  public String toString()
+  {
+    return "ArbitraryGranularitySpec{" +
+           "intervals=" + intervals +
+           ", queryGranularity=" + queryGranularity +
+           ", rollup=" + rollup +
+           '}';
+  }
+
+  @Override
+  public GranularitySpec withIntervals(List<Interval> inputIntervals)
+  {
+    return new ArbitraryGranularitySpec(queryGranularity, rollup, inputIntervals);
   }
 }

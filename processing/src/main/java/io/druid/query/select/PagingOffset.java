@@ -37,8 +37,6 @@ public abstract class PagingOffset
     this.threshold = threshold;
   }
 
-  public abstract boolean isDescending();
-
   public final int startOffset()
   {
     return startOffset;
@@ -70,16 +68,13 @@ public abstract class PagingOffset
       super(offset, threshold);
     }
 
-    public final boolean isDescending()
-    {
-      return false;
-    }
-
+    @Override
     public final int startDelta()
     {
       return startOffset;
     }
 
+    @Override
     public final int current()
     {
       return startOffset + counter;
@@ -93,16 +88,13 @@ public abstract class PagingOffset
       super(offset, threshold);
     }
 
-    public final boolean isDescending()
-    {
-      return true;
-    }
-
+    @Override
     public final int startDelta()
     {
       return -startOffset - 1;
     }
 
+    @Override
     public final int current()
     {
       return startOffset - counter;

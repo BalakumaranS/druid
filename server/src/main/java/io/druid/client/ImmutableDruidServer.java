@@ -19,8 +19,11 @@
 
 package io.druid.client;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
+import com.metamx.common.StringUtils;
 import io.druid.server.coordination.DruidServerMetadata;
+import io.druid.server.coordination.ServerType;
 import io.druid.timeline.DataSegment;
 
 import java.util.Map;
@@ -41,7 +44,7 @@ public class ImmutableDruidServer
       ImmutableMap<String, DataSegment> segments
   )
   {
-    this.metadata = metadata;
+    this.metadata = Preconditions.checkNotNull(metadata);
     this.currSize = currSize;
     this.segments = segments;
     this.dataSources = dataSources;
@@ -72,7 +75,7 @@ public class ImmutableDruidServer
     return metadata.getMaxSize();
   }
 
-  public String getType()
+  public ServerType getType()
   {
     return metadata.getType();
   }
@@ -97,8 +100,58 @@ public class ImmutableDruidServer
     return dataSources.values();
   }
 
+  public ImmutableDruidDataSource getDataSource(String name)
+  {
+    return dataSources.get(name);
+  }
+
   public Map<String, DataSegment> getSegments()
   {
     return segments;
+  }
+
+  public String getURL()
+  {
+    if (metadata.getHostAndTlsPort() != null) {
+      return StringUtils.safeFormat("https://%s", metadata.getHostAndTlsPort());
+    } else {
+      return StringUtils.safeFormat("http://%s", metadata.getHostAndPort());
+    }
+  }
+
+  @Override
+  public String toString()
+  {
+    // segments is intentionally ignored because it is usually large
+    return "ImmutableDruidServer{"
+           + "meta='" + metadata
+           + "', size='" + currSize
+           + "', sources='" + dataSources
+           + "'}";
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+
+    ImmutableDruidServer that = (ImmutableDruidServer) o;
+
+    if (metadata.equals(that.metadata)) {
+      return false;
+    }
+
+    return true;
+  }
+
+  @Override
+  public int hashCode()
+  {
+    return metadata.hashCode();
   }
 }

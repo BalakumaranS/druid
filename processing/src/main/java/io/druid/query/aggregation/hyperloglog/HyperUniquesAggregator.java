@@ -19,45 +19,54 @@
 
 package io.druid.query.aggregation.hyperloglog;
 
+import io.druid.hll.HyperLogLogCollector;
 import io.druid.query.aggregation.Aggregator;
-import io.druid.segment.ObjectColumnSelector;
+import io.druid.segment.BaseObjectColumnValueSelector;
+
+import javax.annotation.Nullable;
 
 /**
  */
 public class HyperUniquesAggregator implements Aggregator
 {
-  private final String name;
-  private final ObjectColumnSelector selector;
+  private final BaseObjectColumnValueSelector selector;
 
   private HyperLogLogCollector collector;
 
-  public HyperUniquesAggregator(
-      String name,
-      ObjectColumnSelector selector
-  )
+  public HyperUniquesAggregator(BaseObjectColumnValueSelector selector)
   {
-    this.name = name;
     this.selector = selector;
-
-    this.collector = HyperLogLogCollector.makeLatestCollector();
   }
 
   @Override
   public void aggregate()
   {
-    collector.fold((HyperLogLogCollector) selector.get());
+    Object object = selector.getObject();
+    if (object == null) {
+      return;
+    }
+    if (collector == null) {
+      collector = HyperLogLogCollector.makeLatestCollector();
+    }
+    collector.fold((HyperLogLogCollector) object);
   }
 
   @Override
   public void reset()
   {
-    collector = HyperLogLogCollector.makeLatestCollector();
+    collector = null;
   }
 
+  @Nullable
   @Override
   public Object get()
   {
-    return collector;
+    if (collector == null) {
+      return null;
+    }
+    // Workaround for non-thread-safe use of HyperLogLogCollector.
+    // OnheapIncrementalIndex has a penchant for calling "aggregate" and "get" simultaneously.
+    return HyperLogLogCollector.makeCollectorSharingStorage(collector);
   }
 
   @Override
@@ -73,15 +82,15 @@ public class HyperUniquesAggregator implements Aggregator
   }
 
   @Override
-  public String getName()
+  public double getDouble()
   {
-    return name;
+    throw new UnsupportedOperationException("HyperUniquesAggregator does not support getDouble()");
   }
 
   @Override
   public Aggregator clone()
   {
-    return new HyperUniquesAggregator(name, selector);
+    return new HyperUniquesAggregator(selector);
   }
 
   @Override

@@ -19,22 +19,25 @@
 
 package io.druid.segment;
 
-import com.google.common.collect.Iterators;
-import com.google.common.collect.Maps;
+import com.google.common.base.Predicate;
 import io.druid.query.extraction.ExtractionFn;
+import io.druid.query.filter.ValueMatcher;
+import io.druid.query.monomorphicprocessing.RuntimeShapeInspector;
 import io.druid.segment.data.IndexedInts;
+import io.druid.segment.data.SingleIndexedInt;
 
-import java.io.IOException;
-import java.util.Iterator;
-import java.util.Map;
+import javax.annotation.Nullable;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
 
 public class SingleScanTimeDimSelector implements DimensionSelector
 {
   private final ExtractionFn extractionFn;
-  private final LongColumnSelector selector;
+  private final BaseLongColumnValueSelector selector;
   private final boolean descending;
 
-  private final Map<Integer, String> timeValues = Maps.newHashMap();
+  private final List<String> timeValues = new ArrayList<>();
   private String currentValue = null;
   private long currentTimestamp = Long.MIN_VALUE;
   private int index = -1;
@@ -44,7 +47,7 @@ public class SingleScanTimeDimSelector implements DimensionSelector
   // - it assumes time values are scanned once and values are grouped together
   //   (i.e. we never revisit a timestamp we have seen before, unless it is the same as the last accessed one)
   // - it also applies and caches extraction function values at the DimSelector level to speed things up
-  public SingleScanTimeDimSelector(LongColumnSelector selector, ExtractionFn extractionFn, boolean descending)
+  public SingleScanTimeDimSelector(BaseLongColumnValueSelector selector, ExtractionFn extractionFn, boolean descending)
   {
     if (extractionFn == null) {
       throw new UnsupportedOperationException("time dimension must provide an extraction function");
@@ -58,22 +61,65 @@ public class SingleScanTimeDimSelector implements DimensionSelector
   @Override
   public IndexedInts getRow()
   {
+    return SingleIndexedInt.of(getDimensionValueIndex());
+  }
+
+  @Override
+  public ValueMatcher makeValueMatcher(final String value)
+  {
+    return new ValueMatcher()
+    {
+      @Override
+      public boolean matches()
+      {
+        return Objects.equals(lookupName(getDimensionValueIndex()), value);
+      }
+
+      @Override
+      public void inspectRuntimeShape(RuntimeShapeInspector inspector)
+      {
+        inspector.visit("selector", SingleScanTimeDimSelector.this);
+      }
+    };
+  }
+
+  @Override
+  public ValueMatcher makeValueMatcher(final Predicate<String> predicate)
+  {
+    return new ValueMatcher()
+    {
+      @Override
+      public boolean matches()
+      {
+        return predicate.apply(lookupName(getDimensionValueIndex()));
+      }
+
+      @Override
+      public void inspectRuntimeShape(RuntimeShapeInspector inspector)
+      {
+        inspector.visit("selector", SingleScanTimeDimSelector.this);
+        inspector.visit("predicate", predicate);
+      }
+    };
+  }
+
+  private int getDimensionValueIndex()
+  {
     // if this the first timestamp, apply and cache extraction function result
-    final long timestamp = selector.get();
+    final long timestamp = selector.getLong();
     if (index < 0) {
       currentTimestamp = timestamp;
       currentValue = extractionFn.apply(timestamp);
       ++index;
-      timeValues.put(index, currentValue);
-    }
-    // if this is a new timestamp, apply and cache extraction function result
-    // since timestamps are assumed grouped and scanned once, we only need to
-    // check if the current timestamp is different than the current timestamp.
-    //
-    // If this new timestamp is mapped to the same value by the extraction function,
-    // we can also avoid creating a dimension value and corresponding index
-    // and use the current one
-    else if (timestamp != currentTimestamp) {
+      timeValues.add(currentValue);
+      // if this is a new timestamp, apply and cache extraction function result
+      // since timestamps are assumed grouped and scanned once, we only need to
+      // check if the current timestamp is different than the current timestamp.
+      //
+      // If this new timestamp is mapped to the same value by the extraction function,
+      // we can also avoid creating a dimension value and corresponding index
+      // and use the current one
+    } else if (timestamp != currentTimestamp) {
       if (descending ? timestamp > currentTimestamp : timestamp < currentTimestamp) {
         // re-using this selector for multiple scans would cause the same rows to return different IDs
         // we might want to re-visit if we ever need to do multiple scans with this dimension selector
@@ -81,10 +127,10 @@ public class SingleScanTimeDimSelector implements DimensionSelector
       }
       currentTimestamp = timestamp;
       final String value = extractionFn.apply(timestamp);
-      if (!value.equals(currentValue)) {
+      if (!Objects.equals(value, currentValue)) {
         currentValue = value;
         ++index;
-        timeValues.put(index, currentValue);
+        timeValues.add(currentValue);
       }
       // Note: this could be further optimized by checking if the new value is one we have
       // previously seen, but would require keeping track of both the current and the maximum index
@@ -92,39 +138,7 @@ public class SingleScanTimeDimSelector implements DimensionSelector
     // otherwise, if the current timestamp is the same as the previous timestamp,
     // keep using the same dimension value index
 
-    final int dimensionValueIndex = index;
-    return new IndexedInts()
-    {
-      @Override
-      public int size()
-      {
-        return 1;
-      }
-
-      @Override
-      public int get(int i)
-      {
-        return dimensionValueIndex;
-      }
-
-      @Override
-      public Iterator<Integer> iterator()
-      {
-        return Iterators.singletonIterator(dimensionValueIndex);
-      }
-
-      @Override
-      public void fill(int index, int[] toFill)
-      {
-        throw new UnsupportedOperationException("fill not supported");
-      }
-
-      @Override
-      public void close() throws IOException
-      {
-
-      }
-    };
+    return index;
   }
 
   @Override
@@ -144,8 +158,36 @@ public class SingleScanTimeDimSelector implements DimensionSelector
   }
 
   @Override
-  public int lookupId(String name)
+  public boolean nameLookupPossibleInAdvance()
   {
-    throw new UnsupportedOperationException("time column does not support lookups");
+    return false;
+  }
+
+  @Nullable
+  @Override
+  public IdLookup idLookup()
+  {
+    return null;
+  }
+
+  @Nullable
+  @Override
+  public Object getObject()
+  {
+    return currentValue;
+  }
+
+  @Override
+  public Class classOfObject()
+  {
+    return String.class;
+  }
+
+  @Override
+  public void inspectRuntimeShape(RuntimeShapeInspector inspector)
+  {
+    inspector.visit("selector", selector);
+    inspector.visit("extractionFn", extractionFn);
+    inspector.visit("descending", descending);
   }
 }

@@ -19,25 +19,26 @@
 
 package io.druid.query.aggregation;
 
-import com.metamx.common.logger.Logger;
+import io.druid.guice.annotations.ExtensionPoint;
+import io.druid.java.util.common.Cacheable;
+import io.druid.java.util.common.UOE;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.segment.ColumnSelectorFactory;
 
+import javax.annotation.Nullable;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * Processing related interface
- * 
- * An AggregatorFactory is an object that knows how to generate an Aggregator using a ColumnSelectorFactory.
- * 
- * This is useful as an abstraction to allow Aggregator classes to be written in terms of MetricSelector objects
- * without making any assumptions about how they are pulling values out of the base data.  That is, the data is
- * provided to the Aggregator through the MetricSelector object, so whatever creates that object gets to choose how
- * the data is actually stored and accessed.
+ * AggregatorFactory is a strategy (in the terms of Design Patterns) that represents column aggregation, e. g. min,
+ * max, sum of metric columns, or cardinality of dimension columns (see {@link
+ * io.druid.query.aggregation.cardinality.CardinalityAggregatorFactory}).
  */
-public abstract class AggregatorFactory
+@ExtensionPoint
+public abstract class AggregatorFactory implements Cacheable
 {
   private static final Logger log = new Logger(AggregatorFactory.class);
 
@@ -48,10 +49,10 @@ public abstract class AggregatorFactory
   public abstract Comparator getComparator();
 
   /**
-   * A method that knows how to combine the outputs of the getIntermediate() method from the Aggregators
-   * produced via factorize().  Note, even though this is called combine, this method's contract *does*
-   * allow for mutation of the input objects.  Thus, any use of lhs or rhs after calling this method is
-   * highly discouraged.
+   * A method that knows how to combine the outputs of {@link Aggregator#get} produced via {@link #factorize} or {@link
+   * BufferAggregator#get} produced via {@link #factorizeBuffered}. Note, even though this method is called "combine",
+   * this method's contract *does* allow for mutation of the input objects. Thus, any use of lhs or rhs after calling
+   * this method is highly discouraged.
    *
    * @param lhs The left hand side of the combine
    * @param rhs The right hand side of the combine
@@ -59,6 +60,21 @@ public abstract class AggregatorFactory
    * @return an object representing the combination of lhs and rhs, this can be a new object or a mutation of the inputs
    */
   public abstract Object combine(Object lhs, Object rhs);
+
+  /**
+   * Creates an AggregateCombiner to fold rollup aggregation results from serveral "rows" of different indexes during
+   * index merging. AggregateCombiner implements the same logic as {@link #combine}, with the difference that it uses
+   * {@link io.druid.segment.ColumnValueSelector} and it's subinterfaces to get inputs and implements {@code
+   * ColumnValueSelector} to provide output.
+   *
+   * @see AggregateCombiner
+   * @see io.druid.segment.IndexMerger
+   */
+  @SuppressWarnings("unused") // Going to be used when https://github.com/druid-io/druid/projects/2 is complete
+  public AggregateCombiner makeAggregateCombiner()
+  {
+    throw new UOE("[%s] does not implement makeAggregateCombiner()", this.getClass().getName());
+  }
 
   /**
    * Returns an AggregatorFactory that can be used to combine the output of aggregators from this factory.  This
@@ -78,7 +94,12 @@ public abstract class AggregatorFactory
    */
   public AggregatorFactory getMergingFactory(AggregatorFactory other) throws AggregatorFactoryNotMergeableException
   {
-    throw new UnsupportedOperationException(String.format("[%s] does not implement getMergingFactory(..)", this.getClass().getName()));
+    final AggregatorFactory combiningFactory = this.getCombiningFactory();
+    if (other.getName().equals(this.getName()) && combiningFactory.equals(other.getCombiningFactory())) {
+      return combiningFactory;
+    } else {
+      throw new AggregatorFactoryNotMergeableException(this, other);
+    }
   }
 
   /**
@@ -112,8 +133,6 @@ public abstract class AggregatorFactory
 
   public abstract List<String> requiredFields();
 
-  public abstract byte[] getCacheKey();
-
   public abstract String getTypeName();
 
   /**
@@ -122,13 +141,6 @@ public abstract class AggregatorFactory
    * @return the maximum number of bytes that an aggregator of this type will require for intermediate result storage.
    */
   public abstract int getMaxIntermediateSize();
-
-  /**
-   * Returns the starting value for a corresponding aggregator. For example, 0 for sums, - Infinity for max, an empty mogrifier
-   *
-   * @return the starting value for a corresponding aggregator.
-   */
-  public abstract Object getAggregatorStartValue();
 
   /**
    * Merges the list of AggregatorFactory[] (presumable from metadata of some segments being merged) and
@@ -141,10 +153,22 @@ public abstract class AggregatorFactory
    *
    * @return merged AggregatorFactory[] or Null if merging is not possible.
    */
+  @Nullable
   public static AggregatorFactory[] mergeAggregators(List<AggregatorFactory[]> aggregatorsList)
   {
     if (aggregatorsList == null || aggregatorsList.isEmpty()) {
       return null;
+    }
+
+    if (aggregatorsList.size() == 1) {
+      final AggregatorFactory[] aggregatorFactories = aggregatorsList.get(0);
+      if (aggregatorFactories != null) {
+        final AggregatorFactory[] combiningFactories = new AggregatorFactory[aggregatorFactories.length];
+        Arrays.setAll(combiningFactories, i -> aggregatorFactories[i].getCombiningFactory());
+        return combiningFactories;
+      } else {
+        return null;
+      }
     }
 
     Map<String, AggregatorFactory> mergedAggregators = new LinkedHashMap<>();
@@ -157,7 +181,9 @@ public abstract class AggregatorFactory
           if (mergedAggregators.containsKey(name)) {
             AggregatorFactory other = mergedAggregators.get(name);
             try {
-              mergedAggregators.put(name, other.getMergingFactory(aggregator));
+              // the order of aggregator matters when calling getMergingFactory()
+              // because it returns a combiningAggregator which can be different from the original aggregator.
+              mergedAggregators.put(name, aggregator.getMergingFactory(other));
             }
             catch (AggregatorFactoryNotMergeableException ex) {
               log.warn(ex, "failed to merge aggregator factories");

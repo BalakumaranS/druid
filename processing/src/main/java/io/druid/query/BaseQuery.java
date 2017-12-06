@@ -24,8 +24,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Ordering;
-import com.metamx.common.ISE;
-import com.metamx.common.guava.Sequence;
+import io.druid.guice.annotations.ExtensionPoint;
 import io.druid.query.spec.QuerySegmentSpec;
 import org.joda.time.Duration;
 import org.joda.time.Interval;
@@ -35,65 +34,13 @@ import java.util.Map;
 
 /**
  */
+@ExtensionPoint
 public abstract class BaseQuery<T extends Comparable<T>> implements Query<T>
 {
-  public static <T> int getContextPriority(Query<T> query, int defaultValue)
+  public static void checkInterrupted()
   {
-    return parseInt(query, "priority", defaultValue);
-  }
-
-  public static <T> boolean getContextBySegment(Query<T> query, boolean defaultValue)
-  {
-    return parseBoolean(query, "bySegment", defaultValue);
-  }
-
-  public static <T> boolean getContextPopulateCache(Query<T> query, boolean defaultValue)
-  {
-    return parseBoolean(query, "populateCache", defaultValue);
-  }
-
-  public static <T> boolean getContextUseCache(Query<T> query, boolean defaultValue)
-  {
-    return parseBoolean(query, "useCache", defaultValue);
-  }
-
-  public static <T> boolean getContextFinalize(Query<T> query, boolean defaultValue)
-  {
-    return parseBoolean(query, "finalize", defaultValue);
-  }
-
-  public static <T> int getContextUncoveredIntervalsLimit(Query<T> query, int defaultValue)
-  {
-    return parseInt(query, "uncoveredIntervalsLimit", defaultValue);
-  }
-
-  private static <T> int parseInt(Query<T> query, String key, int defaultValue)
-  {
-    Object val = query.getContextValue(key);
-    if (val == null) {
-      return defaultValue;
-    }
-    if (val instanceof String) {
-      return Integer.parseInt((String) val);
-    } else if (val instanceof Integer) {
-      return (int) val;
-    } else {
-      throw new ISE("Unknown type [%s]", val.getClass());
-    }
-  }
-
-  private static <T> boolean parseBoolean(Query<T> query, String key, boolean defaultValue)
-  {
-    Object val = query.getContextValue(key);
-    if (val == null) {
-      return defaultValue;
-    }
-    if (val instanceof String) {
-      return Boolean.parseBoolean((String) val);
-    } else if (val instanceof Boolean) {
-      return (boolean) val;
-    } else {
-      throw new ISE("Unknown type [%s]. Cannot parse!", val.getClass());
+    if (Thread.interrupted()) {
+      throw new QueryInterruptedException(new InterruptedException());
     }
   }
 
@@ -141,14 +88,9 @@ public abstract class BaseQuery<T extends Comparable<T>> implements Query<T>
   }
 
   @Override
-  public Sequence<T> run(QuerySegmentWalker walker, Map<String, Object> context)
+  public QueryRunner<T> getRunner(QuerySegmentWalker walker)
   {
-    return run(querySegmentSpec.lookup(this, walker), context);
-  }
-
-  public Sequence<T> run(QueryRunner<T> runner, Map<String, Object> context)
-  {
-    return runner.run(this, context);
+    return querySegmentSpec.lookup(this, walker);
   }
 
   @Override
@@ -193,10 +135,28 @@ public abstract class BaseQuery<T extends Comparable<T>> implements Query<T>
     return retVal == null ? defaultValue : retVal;
   }
 
-  protected Map<String, Object> computeOverridenContext(Map<String, Object> overrides)
+  @Override
+  public boolean getContextBoolean(String key, boolean defaultValue)
+  {
+    return QueryContexts.parseBoolean(this, key, defaultValue);
+  }
+
+  /**
+   * @deprecated use {@link #computeOverriddenContext(Map, Map) computeOverriddenContext(getContext(), overrides))}
+   * instead. This method may be removed in the next minor or major version of Druid.
+   */
+  @Deprecated
+  protected Map<String, Object> computeOverridenContext(final Map<String, Object> overrides)
+  {
+    return computeOverriddenContext(getContext(), overrides);
+  }
+
+  protected static Map<String, Object> computeOverriddenContext(
+      final Map<String, Object> context,
+      final Map<String, Object> overrides
+  )
   {
     Map<String, Object> overridden = Maps.newTreeMap();
-    final Map<String, Object> context = getContext();
     if (context != null) {
       overridden.putAll(context);
     }
@@ -221,7 +181,7 @@ public abstract class BaseQuery<T extends Comparable<T>> implements Query<T>
   @Override
   public Query withId(String id)
   {
-    return withOverriddenContext(ImmutableMap.<String, Object>of(QUERYID, id));
+    return withOverriddenContext(ImmutableMap.of(QUERYID, id));
   }
 
   @Override

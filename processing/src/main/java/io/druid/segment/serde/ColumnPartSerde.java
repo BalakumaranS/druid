@@ -24,9 +24,7 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import io.druid.segment.column.ColumnBuilder;
 import io.druid.segment.column.ColumnConfig;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.channels.WritableByteChannel;
 
 /**
  */
@@ -35,23 +33,17 @@ import java.nio.channels.WritableByteChannel;
     @JsonSubTypes.Type(name = "complex", value = ComplexColumnPartSerde.class),
     @JsonSubTypes.Type(name = "float", value = FloatGenericColumnPartSerde.class),
     @JsonSubTypes.Type(name = "long", value = LongGenericColumnPartSerde.class),
+    @JsonSubTypes.Type(name = "double", value = DoubleGenericColumnPartSerde.class),
     @JsonSubTypes.Type(name = "stringDictionary", value = DictionaryEncodedColumnPartSerde.class)
 })
 public interface ColumnPartSerde
 {
-  public Serializer getSerializer();
+  Serializer getSerializer();
 
-  public Deserializer getDeserializer();
+  Deserializer getDeserializer();
 
-  public interface Serializer
+  interface Deserializer
   {
-    public long numBytes();
-
-    public void write(WritableByteChannel channel) throws IOException;
-  }
-
-  public interface Deserializer
-  {
-    public void read(ByteBuffer buffer, ColumnBuilder builder, ColumnConfig columnConfig);
+    void read(ByteBuffer buffer, ColumnBuilder builder, ColumnConfig columnConfig);
   }
 }

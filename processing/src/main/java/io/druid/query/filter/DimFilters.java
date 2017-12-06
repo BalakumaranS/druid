@@ -20,6 +20,8 @@
 package io.druid.query.filter;
 
 import com.google.common.base.Function;
+import com.google.common.base.Predicates;
+import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 
 import java.util.Arrays;
@@ -31,7 +33,7 @@ public class DimFilters
 {
   public static SelectorDimFilter dimEquals(String dimension, String value)
   {
-    return new SelectorDimFilter(dimension, value);
+    return new SelectorDimFilter(dimension, value, null);
   }
 
   public static AndDimFilter and(DimFilter... filters)
@@ -59,25 +61,24 @@ public class DimFilters
     return new NotDimFilter(filter);
   }
 
-  public static RegexDimFilter regex(String dimension, String pattern)
+  public static List<DimFilter> optimize(List<DimFilter> filters)
   {
-    return new RegexDimFilter(dimension, pattern);
-  }
-
-  public static DimFilter dimEquals(final String dimension, String... values)
-  {
-    return or(
+    return filterNulls(
         Lists.transform(
-            Arrays.asList(values),
-            new Function<String, DimFilter>()
+            filters, new Function<DimFilter, DimFilter>()
             {
               @Override
-              public DimFilter apply(String input)
+              public DimFilter apply(DimFilter input)
               {
-                return dimEquals(dimension, input);
+                return input.optimize();
               }
             }
         )
     );
+  }
+
+  public static List<DimFilter> filterNulls(List<DimFilter> optimized)
+  {
+    return Lists.newArrayList(Iterables.filter(optimized, Predicates.notNull()));
   }
 }

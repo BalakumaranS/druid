@@ -32,6 +32,7 @@ import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.PriorityQueue;
 
 /**
@@ -81,11 +82,12 @@ public class TopNLexicographicResultBuilder implements TopNResultBuilder
 
   @Override
   public TopNResultBuilder addEntry(
-      String dimName,
+      Comparable dimNameObj,
       Object dimValIndex,
       Object[] metricVals
   )
   {
+    final String dimName = Objects.toString(dimNameObj, null);
     final Map<String, Object> metricValues = Maps.newHashMapWithExpectedSize(metricVals.length + 1);
 
     if (shouldAdd(dimName)) {
@@ -94,16 +96,22 @@ public class TopNLexicographicResultBuilder implements TopNResultBuilder
       switch (extra) {
         case 7:
           metricValues.put(aggFactoryNames[6], metricVals[6]);
+          // fall through
         case 6:
           metricValues.put(aggFactoryNames[5], metricVals[5]);
+          // fall through
         case 5:
           metricValues.put(aggFactoryNames[4], metricVals[4]);
+          // fall through
         case 4:
           metricValues.put(aggFactoryNames[3], metricVals[3]);
+          // fall through
         case 3:
           metricValues.put(aggFactoryNames[2], metricVals[2]);
+          // fall through
         case 2:
           metricValues.put(aggFactoryNames[1], metricVals[1]);
+          // fall through
         case 1:
           metricValues.put(aggFactoryNames[0], metricVals[0]);
       }
@@ -130,7 +138,8 @@ public class TopNLexicographicResultBuilder implements TopNResultBuilder
   @Override
   public TopNResultBuilder addEntry(DimensionAndMetricValueExtractor dimensionAndMetricValueExtractor)
   {
-    String dimensionValue = dimensionAndMetricValueExtractor.getStringDimensionValue(dimSpec.getOutputName());
+    Object dimensionValueObj = dimensionAndMetricValueExtractor.getDimensionValue(dimSpec.getOutputName());
+    String dimensionValue = Objects.toString(dimensionValueObj, null);
 
     if (shouldAdd(dimensionValue)) {
       pQueue.add(

@@ -22,17 +22,14 @@ package io.druid.query.extraction;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
-import com.google.common.collect.Sets;
 import io.druid.jackson.DefaultObjectMapper;
-import io.druid.query.dimension.ExtractionDimensionSpec;
-import io.druid.query.search.search.FragmentSearchQuerySpec;
-import io.druid.query.search.search.SearchQuerySpec;
+import io.druid.query.search.FragmentSearchQuerySpec;
+import io.druid.query.search.SearchQuerySpec;
 import org.junit.Assert;
 import org.junit.Test;
 
 import java.util.Arrays;
 import java.util.List;
-import java.util.Set;
 
 /**
  */

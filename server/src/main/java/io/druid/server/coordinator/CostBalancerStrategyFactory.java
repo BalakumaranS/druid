@@ -18,20 +18,13 @@
  */
 package io.druid.server.coordinator;
 
-import org.joda.time.DateTime;
+import com.google.common.util.concurrent.ListeningExecutorService;
 
 public class CostBalancerStrategyFactory implements BalancerStrategyFactory
 {
-  private final int threadCount;
-
-  public CostBalancerStrategyFactory(int costBalancerStrategyThreadCount)
-  {
-    this.threadCount = costBalancerStrategyThreadCount;
-  }
-
   @Override
-  public BalancerStrategy createBalancerStrategy(DateTime referenceTimestamp)
+  public CostBalancerStrategy createBalancerStrategy(ListeningExecutorService exec)
   {
-    return new CostBalancerStrategy(referenceTimestamp, threadCount);
+    return new CostBalancerStrategy(exec);
   }
 }

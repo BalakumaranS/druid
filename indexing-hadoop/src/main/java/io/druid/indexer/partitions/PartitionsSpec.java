@@ -26,6 +26,8 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import io.druid.indexer.HadoopDruidIndexerConfig;
 import io.druid.indexer.Jobby;
 
+import java.util.List;
+
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type", defaultImpl = HashedPartitionsSpec.class)
 @JsonSubTypes(value = {
     @JsonSubTypes.Type(name = "dimension", value = SingleDimensionPartitionsSpec.class),
@@ -34,21 +36,23 @@ import io.druid.indexer.Jobby;
 public interface PartitionsSpec
 {
   @JsonIgnore
-  public Jobby getPartitionJob(HadoopDruidIndexerConfig config);
+  Jobby getPartitionJob(HadoopDruidIndexerConfig config);
 
   @JsonProperty
-  public long getTargetPartitionSize();
+  long getTargetPartitionSize();
 
   @JsonProperty
-  public long getMaxPartitionSize();
+  long getMaxPartitionSize();
 
   @JsonProperty
-  public boolean isAssumeGrouped();
+  boolean isAssumeGrouped();
 
   @JsonIgnore
-  public boolean isDeterminingPartitions();
+  boolean isDeterminingPartitions();
 
   @JsonProperty
-  public int getNumShards();
+  int getNumShards();
 
+  @JsonProperty
+  List<String> getPartitionDimensions();
 }

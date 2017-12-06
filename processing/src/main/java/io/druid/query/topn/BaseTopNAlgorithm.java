@@ -19,14 +19,18 @@
 
 package io.druid.query.topn;
 
-import com.metamx.common.Pair;
+import io.druid.java.util.common.IAE;
+import io.druid.java.util.common.Pair;
 import io.druid.query.aggregation.Aggregator;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.BufferAggregator;
+import io.druid.query.topn.types.TopNColumnSelectorStrategy;
 import io.druid.segment.Capabilities;
 import io.druid.segment.Cursor;
 import io.druid.segment.DimensionSelector;
+import io.druid.segment.IdLookup;
 
+import javax.annotation.Nullable;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
@@ -36,12 +40,12 @@ import java.util.List;
 public abstract class BaseTopNAlgorithm<DimValSelector, DimValAggregateStore, Parameters extends TopNParams>
     implements TopNAlgorithm<DimValSelector, Parameters>
 {
-  protected static Aggregator[] makeAggregators(Cursor cursor, List<AggregatorFactory> aggregatorSpecs)
+  public static Aggregator[] makeAggregators(Cursor cursor, List<AggregatorFactory> aggregatorSpecs)
   {
     Aggregator[] aggregators = new Aggregator[aggregatorSpecs.size()];
     int aggregatorIndex = 0;
     for (AggregatorFactory spec : aggregatorSpecs) {
-      aggregators[aggregatorIndex] = spec.factorize(cursor);
+      aggregators[aggregatorIndex] = spec.factorize(cursor.getColumnSelectorFactory());
       ++aggregatorIndex;
     }
     return aggregators;
@@ -52,13 +56,13 @@ public abstract class BaseTopNAlgorithm<DimValSelector, DimValAggregateStore, Pa
     BufferAggregator[] aggregators = new BufferAggregator[aggregatorSpecs.size()];
     int aggregatorIndex = 0;
     for (AggregatorFactory spec : aggregatorSpecs) {
-      aggregators[aggregatorIndex] = spec.factorizeBuffered(cursor);
+      aggregators[aggregatorIndex] = spec.factorizeBuffered(cursor.getColumnSelectorFactory());
       ++aggregatorIndex;
     }
     return aggregators;
   }
 
-  private final Capabilities capabilities;
+  protected final Capabilities capabilities;
 
   protected BaseTopNAlgorithm(Capabilities capabilities)
   {
@@ -69,13 +73,32 @@ public abstract class BaseTopNAlgorithm<DimValSelector, DimValAggregateStore, Pa
   public void run(
       Parameters params,
       TopNResultBuilder resultBuilder,
-      DimValSelector dimValSelector
+      DimValSelector dimValSelector,
+      @Nullable TopNQueryMetrics queryMetrics
   )
   {
+    if (params.getCardinality() != TopNColumnSelectorStrategy.CARDINALITY_UNKNOWN) {
+      runWithCardinalityKnown(params, resultBuilder, dimValSelector, queryMetrics);
+    } else {
+      runWithCardinalityUnknown(params, resultBuilder, queryMetrics);
+    }
+  }
+
+  private void runWithCardinalityKnown(
+      Parameters params,
+      TopNResultBuilder resultBuilder,
+      DimValSelector dimValSelector,
+      @Nullable TopNQueryMetrics queryMetrics
+  )
+  {
+    if (queryMetrics != null) {
+      queryMetrics.startRecordingScanTime();
+    }
     boolean hasDimValSelector = (dimValSelector != null);
 
-    final int cardinality = params.getCardinality();
+    int cardinality = params.getCardinality();
     int numProcessed = 0;
+    long processedRows = 0;
     while (numProcessed < cardinality) {
       final int numToProcess;
       int maxNumToProcess = Math.min(params.getNumValuesPerPass(), cardinality - numProcessed);
@@ -92,7 +115,7 @@ public abstract class BaseTopNAlgorithm<DimValSelector, DimValAggregateStore, Pa
 
       DimValAggregateStore aggregatesStore = makeDimValAggregateStore(params);
 
-      scanAndAggregate(params, theDimValSelector, aggregatesStore, numProcessed);
+      processedRows = scanAndAggregate(params, theDimValSelector, aggregatesStore);
 
       updateResults(params, theDimValSelector, aggregatesStore, resultBuilder);
 
@@ -100,6 +123,37 @@ public abstract class BaseTopNAlgorithm<DimValSelector, DimValAggregateStore, Pa
 
       numProcessed += numToProcess;
       params.getCursor().reset();
+    }
+    if (queryMetrics != null) {
+      queryMetrics.addProcessedRows(processedRows);
+      queryMetrics.stopRecordingScanTime();
+    }
+  }
+
+  /**
+   * This function currently handles TopNs on long and float columns, which do not provide cardinality or an ID lookup.
+   * When cardinality is unknown, process everything in one pass.
+   * Existing implementations of makeDimValSelector() require cardinality as well, so the DimValSelector is not used.
+   * @param params TopN parameters from run()
+   * @param resultBuilder Result builder from run()
+   */
+  private void runWithCardinalityUnknown(
+      Parameters params,
+      TopNResultBuilder resultBuilder,
+      @Nullable TopNQueryMetrics queryMetrics
+  )
+  {
+    DimValAggregateStore aggregatesStore = makeDimValAggregateStore(params);
+    if (queryMetrics != null) {
+      queryMetrics.startRecordingScanTime();
+    }
+    long processedRows = scanAndAggregate(params, null, aggregatesStore);
+    updateResults(params, null, aggregatesStore, resultBuilder);
+    closeAggregators(aggregatesStore);
+    params.getCursor().reset();
+    if (queryMetrics != null) {
+      queryMetrics.addProcessedRows(processedRows);
+      queryMetrics.stopRecordingScanTime();
     }
   }
 
@@ -127,11 +181,13 @@ public abstract class BaseTopNAlgorithm<DimValSelector, DimValAggregateStore, Pa
 
   protected abstract DimValAggregateStore makeDimValAggregateStore(Parameters params);
 
-  protected abstract void scanAndAggregate(
+  /**
+   * Returns the number of processed rows (i. e. after postFilters are applied inside the cursor being processed).
+   */
+  protected abstract long scanAndAggregate(
       Parameters params,
       DimValSelector dimValSelector,
-      DimValAggregateStore dimValAggregateStore,
-      int numProcessed
+      DimValAggregateStore dimValAggregateStore
   );
 
   protected abstract void updateResults(
@@ -145,12 +201,12 @@ public abstract class BaseTopNAlgorithm<DimValSelector, DimValAggregateStore, Pa
       DimValAggregateStore dimValAggregateStore
   );
 
-  protected class AggregatorArrayProvider extends BaseArrayProvider<Aggregator[][]>
+  public static class AggregatorArrayProvider extends BaseArrayProvider<Aggregator[][]>
   {
     Aggregator[][] expansionAggs;
     int cardinality;
 
-    public AggregatorArrayProvider(DimensionSelector dimSelector, TopNQuery query, int cardinality)
+    public AggregatorArrayProvider(DimensionSelector dimSelector, TopNQuery query, int cardinality, Capabilities capabilities)
     {
       super(dimSelector, query, capabilities);
 
@@ -178,7 +234,7 @@ public abstract class BaseTopNAlgorithm<DimValSelector, DimValAggregateStore, Pa
     private volatile int ignoreFirstN;
     private volatile int keepOnlyN;
 
-    private final DimensionSelector dimSelector;
+    private final IdLookup idLookup;
     private final TopNQuery query;
     private final Capabilities capabilities;
 
@@ -188,7 +244,7 @@ public abstract class BaseTopNAlgorithm<DimValSelector, DimValAggregateStore, Pa
         Capabilities capabilities
     )
     {
-      this.dimSelector = dimSelector;
+      this.idLookup = dimSelector.idLookup();
       this.query = query;
       this.capabilities = capabilities;
 
@@ -196,6 +252,10 @@ public abstract class BaseTopNAlgorithm<DimValSelector, DimValAggregateStore, Pa
       ignoreAfterThreshold = false;
       ignoreFirstN = 0;
       keepOnlyN = dimSelector.getValueCardinality();
+
+      if (keepOnlyN < 0) {
+        throw new IAE("Cannot operate on a dimension with no dictionary");
+      }
     }
 
     @Override
@@ -229,7 +289,10 @@ public abstract class BaseTopNAlgorithm<DimValSelector, DimValAggregateStore, Pa
       int startIndex = ignoreFirstN;
 
       if (previousStop != null) {
-        int lookupId = dimSelector.lookupId(previousStop) + 1;
+        if (idLookup == null) {
+          throw new UnsupportedOperationException("Only DimensionSelectors which support idLookup() are supported yet");
+        }
+        int lookupId = idLookup.lookupId(previousStop) + 1;
         if (lookupId < 0) {
           lookupId *= -1;
         }

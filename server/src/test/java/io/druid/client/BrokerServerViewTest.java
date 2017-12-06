@@ -23,21 +23,24 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.smile.SmileFactory;
 import com.fasterxml.jackson.dataformat.smile.SmileGenerator;
 import com.google.common.base.Function;
+import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
-import com.metamx.common.Pair;
 import com.metamx.http.client.HttpClient;
 import io.druid.client.selector.HighestPriorityTierSelectorStrategy;
 import io.druid.client.selector.RandomServerSelectorStrategy;
 import io.druid.client.selector.ServerSelector;
 import io.druid.curator.CuratorTestBase;
 import io.druid.jackson.DefaultObjectMapper;
+import io.druid.java.util.common.Intervals;
+import io.druid.java.util.common.Pair;
 import io.druid.query.QueryToolChestWarehouse;
 import io.druid.query.QueryWatcher;
 import io.druid.query.TableDataSource;
 import io.druid.server.coordination.DruidServerMetadata;
+import io.druid.server.coordination.ServerType;
 import io.druid.server.initialization.ZkPathsConfig;
 import io.druid.server.metrics.NoopServiceEmitter;
 import io.druid.timeline.DataSegment;
@@ -67,7 +70,7 @@ public class BrokerServerViewTest extends CuratorTestBase
   private CountDownLatch segmentAddedLatch;
   private CountDownLatch segmentRemovedLatch;
 
-  private ServerInventoryView baseView;
+  private BatchServerInventoryView baseView;
   private BrokerServerView brokerServerView;
 
   public BrokerServerViewTest()
@@ -96,8 +99,9 @@ public class BrokerServerViewTest extends CuratorTestBase
     final DruidServer druidServer = new DruidServer(
         "localhost:1234",
         "localhost:1234",
+        null,
         10000000L,
-        "historical",
+        ServerType.HISTORICAL,
         "default_tier",
         0
     );
@@ -111,14 +115,14 @@ public class BrokerServerViewTest extends CuratorTestBase
 
     TimelineLookup timeline = brokerServerView.getTimeline(new TableDataSource("test_broker_server_view"));
     List<TimelineObjectHolder> serverLookupRes = (List<TimelineObjectHolder>) timeline.lookup(
-        new Interval(
+        Intervals.of(
             "2014-10-20T00:00:00Z/P1D"
         )
     );
     Assert.assertEquals(1, serverLookupRes.size());
 
     TimelineObjectHolder<String, ServerSelector> actualTimelineObjectHolder = serverLookupRes.get(0);
-    Assert.assertEquals(new Interval("2014-10-20T00:00:00Z/P1D"), actualTimelineObjectHolder.getInterval());
+    Assert.assertEquals(Intervals.of("2014-10-20T00:00:00Z/P1D"), actualTimelineObjectHolder.getInterval());
     Assert.assertEquals("v1", actualTimelineObjectHolder.getVersion());
 
     PartitionHolder<ServerSelector> actualPartitionHolder = actualTimelineObjectHolder.getObject();
@@ -136,9 +140,9 @@ public class BrokerServerViewTest extends CuratorTestBase
 
     Assert.assertEquals(
         0,
-        ((List<TimelineObjectHolder>) timeline.lookup(new Interval("2014-10-20T00:00:00Z/P1D"))).size()
+        ((List<TimelineObjectHolder>) timeline.lookup(Intervals.of("2014-10-20T00:00:00Z/P1D"))).size()
     );
-    Assert.assertNull(timeline.findEntry(new Interval("2014-10-20T00:00:00Z/P1D"), "v1"));
+    Assert.assertNull(timeline.findEntry(Intervals.of("2014-10-20T00:00:00Z/P1D"), "v1"));
   }
 
   @Test
@@ -162,8 +166,9 @@ public class BrokerServerViewTest extends CuratorTestBase
             return new DruidServer(
                 input,
                 input,
+                null,
                 10000000L,
-                "historical",
+                ServerType.HISTORICAL,
                 "default_tier",
                 0
             );
@@ -206,7 +211,7 @@ public class BrokerServerViewTest extends CuratorTestBase
             createExpected("2011-04-06/2011-04-09", "v3", druidServers.get(3), segments.get(3))
         ),
         (List<TimelineObjectHolder>) timeline.lookup(
-            new Interval(
+            Intervals.of(
                 "2011-04-01/2011-04-09"
             )
         )
@@ -228,7 +233,7 @@ public class BrokerServerViewTest extends CuratorTestBase
             createExpected("2011-04-06/2011-04-09", "v3", druidServers.get(3), segments.get(3))
         ),
         (List<TimelineObjectHolder>) timeline.lookup(
-            new Interval(
+            Intervals.of(
                 "2011-04-01/2011-04-09"
             )
         )
@@ -245,7 +250,7 @@ public class BrokerServerViewTest extends CuratorTestBase
 
     Assert.assertEquals(
         0,
-        ((List<TimelineObjectHolder>) timeline.lookup(new Interval("2011-04-01/2011-04-09"))).size()
+        ((List<TimelineObjectHolder>) timeline.lookup(Intervals.of("2011-04-01/2011-04-09"))).size()
     );
   }
 
@@ -256,7 +261,7 @@ public class BrokerServerViewTest extends CuratorTestBase
       DataSegment segment
   )
   {
-    return Pair.of(new Interval(intervalStr), Pair.of(version, Pair.of(druidServer, segment)));
+    return Pair.of(Intervals.of(intervalStr), Pair.of(version, Pair.of(druidServer, segment)));
   }
 
   private void assertValues(
@@ -289,7 +294,8 @@ public class BrokerServerViewTest extends CuratorTestBase
     baseView = new BatchServerInventoryView(
         zkPathsConfig,
         curator,
-        jsonMapper
+        jsonMapper,
+        Predicates.<Pair<DruidServerMetadata, DataSegment>>alwaysTrue()
     )
     {
       @Override
@@ -333,7 +339,8 @@ public class BrokerServerViewTest extends CuratorTestBase
         EasyMock.createMock(HttpClient.class),
         baseView,
         new HighestPriorityTierSelectorStrategy(new RandomServerSelectorStrategy()),
-        new NoopServiceEmitter()
+        new NoopServiceEmitter(),
+        new BrokerSegmentWatcherConfig()
     );
 
     baseView.start();
@@ -343,7 +350,7 @@ public class BrokerServerViewTest extends CuratorTestBase
   {
     return DataSegment.builder()
                       .dataSource("test_broker_server_view")
-                      .interval(new Interval(intervalStr))
+                      .interval(Intervals.of(intervalStr))
                       .loadSpec(
                           ImmutableMap.<String, Object>of(
                               "type",
@@ -355,7 +362,7 @@ public class BrokerServerViewTest extends CuratorTestBase
                       .version(version)
                       .dimensions(ImmutableList.<String>of())
                       .metrics(ImmutableList.<String>of())
-                      .shardSpec(new NoneShardSpec())
+                      .shardSpec(NoneShardSpec.instance())
                       .binaryVersion(9)
                       .size(0)
                       .build();

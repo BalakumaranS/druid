@@ -23,37 +23,25 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Function;
 import com.google.common.base.Joiner;
 import com.google.common.base.Predicate;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
+import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.ListenableFuture;
-import com.metamx.common.concurrent.ScheduledExecutors;
 import com.metamx.emitter.EmittingLogger;
 import com.metamx.emitter.service.ServiceEmitter;
-import io.druid.common.guava.DSuppliers;
-import io.druid.curator.PotentiallyGzippedCompressionProvider;
-import io.druid.curator.cache.SimplePathChildrenCacheFactory;
 import io.druid.indexing.common.IndexingServiceCondition;
 import io.druid.indexing.common.TaskStatus;
-import io.druid.indexing.common.TestMergeTask;
 import io.druid.indexing.common.TestRealtimeTask;
+import io.druid.indexing.common.TestTasks;
 import io.druid.indexing.common.TestUtils;
 import io.druid.indexing.common.task.Task;
 import io.druid.indexing.common.task.TaskResource;
-import io.druid.indexing.overlord.autoscaling.NoopResourceManagementStrategy;
-import io.druid.indexing.overlord.autoscaling.ResourceManagementStrategy;
-import io.druid.indexing.overlord.autoscaling.ScalingStats;
 import io.druid.indexing.overlord.config.RemoteTaskRunnerConfig;
-import io.druid.indexing.overlord.setup.WorkerBehaviorConfig;
-import io.druid.indexing.worker.TaskAnnouncement;
 import io.druid.indexing.worker.Worker;
-import io.druid.server.initialization.IndexerZkConfig;
-import io.druid.server.initialization.ZkPathsConfig;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.StringUtils;
 import org.apache.curator.framework.CuratorFramework;
-import org.apache.curator.framework.CuratorFrameworkFactory;
-import org.apache.curator.retry.ExponentialBackoffRetry;
-import org.apache.curator.test.TestingCluster;
 import org.apache.zookeeper.CreateMode;
 import org.easymock.EasyMock;
 import org.joda.time.Period;
@@ -62,59 +50,45 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Set;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 
 public class RemoteTaskRunnerTest
 {
-  private static final Joiner joiner = Joiner.on("/");
-  private static final String basePath = "/test/druid";
-  private static final String announcementsPath = String.format("%s/indexer/announcements/worker", basePath);
-  private static final String tasksPath = String.format("%s/indexer/tasks/worker", basePath);
-  private static final String statusPath = String.format("%s/indexer/status/worker", basePath);
+  private static final Joiner joiner = RemoteTaskRunnerTestUtils.joiner;
+  private static final String workerHost = "worker";
+  private static final String announcementsPath = joiner.join(RemoteTaskRunnerTestUtils.announcementsPath, workerHost);
+  private static final String statusPath = joiner.join(RemoteTaskRunnerTestUtils.statusPath, workerHost);
   private static final int TIMEOUT_SECONDS = 20;
 
-  private ObjectMapper jsonMapper;
-
-  private TestingCluster testingCluster;
-  private CuratorFramework cf;
   private RemoteTaskRunner remoteTaskRunner;
+  private RemoteTaskRunnerTestUtils rtrTestUtils = new RemoteTaskRunnerTestUtils();
+  private ObjectMapper jsonMapper;
+  private CuratorFramework cf;
 
-  private TestMergeTask task;
-
+  private Task task;
   private Worker worker;
 
   @Before
   public void setUp() throws Exception
   {
-    TestUtils testUtils = new TestUtils();
-    jsonMapper = testUtils.getTestObjectMapper();
+    rtrTestUtils.setUp();
+    jsonMapper = rtrTestUtils.getObjectMapper();
+    cf = rtrTestUtils.getCuratorFramework();
 
-    testingCluster = new TestingCluster(1);
-    testingCluster.start();
-
-    cf = CuratorFrameworkFactory.builder()
-                                .connectString(testingCluster.getConnectString())
-                                .retryPolicy(new ExponentialBackoffRetry(1, 10))
-                                .compressionProvider(new PotentiallyGzippedCompressionProvider(false))
-                                .build();
-    cf.start();
-    cf.blockUntilConnected();
-    cf.create().creatingParentsIfNeeded().forPath(basePath);
-    cf.create().creatingParentsIfNeeded().forPath(tasksPath);
-
-    task = TestMergeTask.createDummyTask("task");
+    task = TestTasks.unending("task");
   }
 
   @After
   public void tearDown() throws Exception
   {
-    remoteTaskRunner.stop();
-    cf.close();
-    testingCluster.stop();
+    if (remoteTaskRunner != null) {
+      remoteTaskRunner.stop();
+    }
+    rtrTestUtils.tearDown();
   }
 
   @Test
@@ -190,7 +164,7 @@ public class RemoteTaskRunnerTest
 
     doSetup();
 
-    remoteTaskRunner.run(TestMergeTask.createDummyTask(new String(new char[5000])));
+    remoteTaskRunner.run(TestTasks.unending(new String(new char[5000])));
 
     EasyMock.verify(emitter);
   }
@@ -358,8 +332,8 @@ public class RemoteTaskRunnerTest
     doSetup();
 
     final Set<String> existingTasks = Sets.newHashSet();
-    for (ZkWorker zkWorker : remoteTaskRunner.getWorkers()) {
-      existingTasks.addAll(zkWorker.getRunningTasks().keySet());
+    for (ImmutableWorkerInfo workerInfo : remoteTaskRunner.getWorkers()) {
+      existingTasks.addAll(workerInfo.getRunningTasks());
     }
     Assert.assertEquals("existingTasks", ImmutableSet.of("first", "second"), existingTasks);
 
@@ -461,80 +435,27 @@ public class RemoteTaskRunnerTest
 
   private void makeRemoteTaskRunner(RemoteTaskRunnerConfig config) throws Exception
   {
-    remoteTaskRunner = new RemoteTaskRunner(
-        jsonMapper,
-        config,
-        new IndexerZkConfig(
-            new ZkPathsConfig()
-            {
-              @Override
-              public String getBase()
-              {
-                return basePath;
-              }
-            }, null, null, null, null, null
-        ),
-        cf,
-        new SimplePathChildrenCacheFactory.Builder().build(),
-        null,
-        DSuppliers.of(new AtomicReference<>(WorkerBehaviorConfig.defaultConfig())),
-        ScheduledExecutors.fixed(1, "Remote-Task-Runner-Cleanup--%d"),
-        new NoopResourceManagementStrategy<RemoteTaskRunner>()
-    );
-
-    remoteTaskRunner.start();
+    remoteTaskRunner = rtrTestUtils.makeRemoteTaskRunner(config);
   }
 
   private void makeWorker() throws Exception
   {
-    worker = new Worker(
-        "worker",
-        "localhost",
-        3,
-        "0"
-    );
-
-    cf.create().creatingParentsIfNeeded().withMode(CreateMode.EPHEMERAL).forPath(
-        announcementsPath,
-        jsonMapper.writeValueAsBytes(worker)
-    );
+    worker = rtrTestUtils.makeWorker(workerHost, 3);
   }
 
   private void disableWorker() throws Exception
   {
-    cf.setData().forPath(
-        announcementsPath,
-        jsonMapper.writeValueAsBytes(new Worker(worker.getHost(), worker.getIp(), worker.getCapacity(), ""))
-    );
+    rtrTestUtils.disableWorker(worker);
   }
 
   private boolean taskAnnounced(final String taskId)
   {
-    return pathExists(joiner.join(tasksPath, taskId));
+    return rtrTestUtils.taskAnnounced(workerHost, taskId);
   }
 
   private boolean workerRunningTask(final String taskId)
   {
-    return pathExists(joiner.join(statusPath, taskId));
-  }
-
-  private boolean pathExists(final String path)
-  {
-    return TestUtils.conditionValid(
-        new IndexingServiceCondition()
-        {
-          @Override
-          public boolean isValid()
-          {
-            try {
-              return cf.checkExists().forPath(path) != null;
-            }
-            catch (Exception e) {
-              throw Throwables.propagate(e);
-            }
-          }
-        }
-    );
+    return rtrTestUtils.workerRunningTask(workerHost, taskId);
   }
 
   private boolean workerCompletedTask(final ListenableFuture<TaskStatus> result)
@@ -553,18 +474,17 @@ public class RemoteTaskRunnerTest
 
   private void mockWorkerRunningTask(final Task task) throws Exception
   {
-    cf.delete().forPath(joiner.join(tasksPath, task.getId()));
-
-    TaskAnnouncement taskAnnouncement = TaskAnnouncement.create(task, TaskStatus.running(task.getId()));
-    cf.create()
-      .creatingParentsIfNeeded()
-      .forPath(joiner.join(statusPath, task.getId()), jsonMapper.writeValueAsBytes(taskAnnouncement));
+    rtrTestUtils.mockWorkerRunningTask("worker", task);
   }
 
   private void mockWorkerCompleteSuccessfulTask(final Task task) throws Exception
   {
-    TaskAnnouncement taskAnnouncement = TaskAnnouncement.create(task, TaskStatus.success(task.getId()));
-    cf.setData().forPath(joiner.join(statusPath, task.getId()), jsonMapper.writeValueAsBytes(taskAnnouncement));
+    rtrTestUtils.mockWorkerCompleteSuccessfulTask("worker", task);
+  }
+
+  private void mockWorkerCompleteFailedTask(final Task task) throws Exception
+  {
+    rtrTestUtils.mockWorkerCompleteFailedTask("worker", task);
   }
 
   @Test
@@ -575,11 +495,11 @@ public class RemoteTaskRunnerTest
     remoteTaskRunner.run(task);
     Assert.assertTrue(taskAnnounced(task.getId()));
     mockWorkerRunningTask(task);
-    Collection<ZkWorker> lazyworkers = remoteTaskRunner.markWorkersLazy(
-        new Predicate<ZkWorker>()
+    Collection<Worker> lazyworkers = remoteTaskRunner.markWorkersLazy(
+        new Predicate<ImmutableWorkerInfo>()
         {
           @Override
-          public boolean apply(ZkWorker input)
+          public boolean apply(ImmutableWorkerInfo input)
           {
             return true;
           }
@@ -596,11 +516,11 @@ public class RemoteTaskRunnerTest
     doSetup();
     remoteTaskRunner.run(task);
     Assert.assertTrue(taskAnnounced(task.getId()));
-    Collection<ZkWorker> lazyworkers = remoteTaskRunner.markWorkersLazy(
-        new Predicate<ZkWorker>()
+    Collection<Worker> lazyworkers = remoteTaskRunner.markWorkersLazy(
+        new Predicate<ImmutableWorkerInfo>()
         {
           @Override
-          public boolean apply(ZkWorker input)
+          public boolean apply(ImmutableWorkerInfo input)
           {
             return true;
           }
@@ -615,11 +535,11 @@ public class RemoteTaskRunnerTest
   public void testFindLazyWorkerNotRunningAnyTask() throws Exception
   {
     doSetup();
-    Collection<ZkWorker> lazyworkers = remoteTaskRunner.markWorkersLazy(
-        new Predicate<ZkWorker>()
+    Collection<Worker> lazyworkers = remoteTaskRunner.markWorkersLazy(
+        new Predicate<ImmutableWorkerInfo>()
         {
           @Override
-          public boolean apply(ZkWorker input)
+          public boolean apply(ImmutableWorkerInfo input)
           {
             return true;
           }
@@ -679,4 +599,252 @@ public class RemoteTaskRunnerTest
     Assert.assertEquals(TaskStatus.Status.SUCCESS, status.getStatusCode());
   }
 
+  @Test
+  public void testSortByInsertionTime() throws Exception
+  {
+    RemoteTaskRunnerWorkItem item1 = new RemoteTaskRunnerWorkItem("b", null, null)
+        .withQueueInsertionTime(DateTimes.of("2015-01-01T00:00:03Z"));
+    RemoteTaskRunnerWorkItem item2 = new RemoteTaskRunnerWorkItem("a", null, null)
+        .withQueueInsertionTime(DateTimes.of("2015-01-01T00:00:02Z"));
+    RemoteTaskRunnerWorkItem item3 = new RemoteTaskRunnerWorkItem("c", null, null)
+        .withQueueInsertionTime(DateTimes.of("2015-01-01T00:00:01Z"));
+    ArrayList<RemoteTaskRunnerWorkItem> workItems = Lists.newArrayList(item1, item2, item3);
+    RemoteTaskRunner.sortByInsertionTime(workItems);
+    Assert.assertEquals(item3, workItems.get(0));
+    Assert.assertEquals(item2, workItems.get(1));
+    Assert.assertEquals(item1, workItems.get(2));
+  }
+
+  @Test
+  public void testBlacklistZKWorkers() throws Exception
+  {
+    Period timeoutPeriod = Period.millis(1000);
+    makeWorker();
+
+    RemoteTaskRunnerConfig rtrConfig = new TestRemoteTaskRunnerConfig(timeoutPeriod);
+    rtrConfig.setMaxPercentageBlacklistWorkers(100);
+
+    makeRemoteTaskRunner(rtrConfig);
+
+    TestRealtimeTask task1 = new TestRealtimeTask(
+        "realtime1",
+        new TaskResource("realtime1", 1),
+        "foo",
+        TaskStatus.success("realtime1"),
+        jsonMapper
+    );
+    Future<TaskStatus> taskFuture1 = remoteTaskRunner.run(task1);
+    Assert.assertTrue(taskAnnounced(task1.getId()));
+    mockWorkerRunningTask(task1);
+    mockWorkerCompleteFailedTask(task1);
+    Assert.assertTrue(taskFuture1.get(TIMEOUT_SECONDS, TimeUnit.SECONDS).isFailure());
+    Assert.assertEquals(0, remoteTaskRunner.getBlackListedWorkers().size());
+    Assert.assertEquals(
+        1,
+        remoteTaskRunner.findWorkerRunningTask(task1.getId()).getContinuouslyFailedTasksCount()
+    );
+
+    TestRealtimeTask task2 = new TestRealtimeTask(
+        "realtime2",
+        new TaskResource("realtime2", 1),
+        "foo",
+        TaskStatus.running("realtime2"),
+        jsonMapper
+    );
+    Future<TaskStatus> taskFuture2 = remoteTaskRunner.run(task2);
+    Assert.assertTrue(taskAnnounced(task2.getId()));
+    mockWorkerRunningTask(task2);
+    mockWorkerCompleteFailedTask(task2);
+    Assert.assertTrue(taskFuture2.get(TIMEOUT_SECONDS, TimeUnit.SECONDS).isFailure());
+    Assert.assertEquals(1, remoteTaskRunner.getBlackListedWorkers().size());
+    Assert.assertEquals(
+        2,
+        remoteTaskRunner.findWorkerRunningTask(task2.getId()).getContinuouslyFailedTasksCount()
+    );
+
+    ((RemoteTaskRunnerTestUtils.TestableRemoteTaskRunner) remoteTaskRunner)
+        .setCurrentTimeMillis(System.currentTimeMillis());
+    remoteTaskRunner.checkBlackListedNodes();
+
+    Assert.assertEquals(1, remoteTaskRunner.getBlackListedWorkers().size());
+
+    ((RemoteTaskRunnerTestUtils.TestableRemoteTaskRunner) remoteTaskRunner)
+        .setCurrentTimeMillis(System.currentTimeMillis() + 2 * timeoutPeriod.toStandardDuration().getMillis());
+    remoteTaskRunner.checkBlackListedNodes();
+
+    // After backOffTime the nodes are removed from blacklist
+    Assert.assertEquals(0, remoteTaskRunner.getBlackListedWorkers().size());
+    Assert.assertEquals(
+        0,
+        remoteTaskRunner.findWorkerRunningTask(task2.getId()).getContinuouslyFailedTasksCount()
+    );
+
+    TestRealtimeTask task3 = new TestRealtimeTask(
+        "realtime3",
+        new TaskResource("realtime3", 1),
+        "foo",
+        TaskStatus.running("realtime3"),
+        jsonMapper
+    );
+    Future<TaskStatus> taskFuture3 = remoteTaskRunner.run(task3);
+    Assert.assertTrue(taskAnnounced(task3.getId()));
+    mockWorkerRunningTask(task3);
+    mockWorkerCompleteSuccessfulTask(task3);
+    Assert.assertTrue(taskFuture3.get(TIMEOUT_SECONDS, TimeUnit.SECONDS).isSuccess());
+    Assert.assertEquals(0, remoteTaskRunner.getBlackListedWorkers().size());
+    Assert.assertEquals(
+        0,
+        remoteTaskRunner.findWorkerRunningTask(task3.getId()).getContinuouslyFailedTasksCount()
+    );
+  }
+
+  /**
+   * With 2 workers and maxPercentageBlacklistWorkers(25), neither worker should ever be blacklisted even after
+   * exceeding maxRetriesBeforeBlacklist.
+   */
+  @Test
+  public void testBlacklistZKWorkers25Percent() throws Exception
+  {
+    Period timeoutPeriod = Period.millis(1000);
+
+    rtrTestUtils.makeWorker("worker", 10);
+    rtrTestUtils.makeWorker("worker2", 10);
+
+    RemoteTaskRunnerConfig rtrConfig = new TestRemoteTaskRunnerConfig(timeoutPeriod);
+    rtrConfig.setMaxPercentageBlacklistWorkers(25);
+
+    makeRemoteTaskRunner(rtrConfig);
+
+    String firstWorker = null;
+    String secondWorker = null;
+
+    for (int i = 1; i < 13; i++) {
+      String taskId = StringUtils.format("rt-%d", i);
+      TestRealtimeTask task = new TestRealtimeTask(
+          taskId, new TaskResource(taskId, 1), "foo", TaskStatus.success(taskId), jsonMapper
+      );
+
+      Future<TaskStatus> taskFuture = remoteTaskRunner.run(task);
+
+      if (i == 1) {
+        if (rtrTestUtils.taskAnnounced("worker2", task.getId())) {
+          firstWorker = "worker2";
+          secondWorker = "worker";
+        } else {
+          firstWorker = "worker";
+          secondWorker = "worker2";
+        }
+      }
+
+      final String expectedWorker = i % 2 == 0 ? secondWorker : firstWorker;
+
+      Assert.assertTrue(rtrTestUtils.taskAnnounced(expectedWorker, task.getId()));
+      rtrTestUtils.mockWorkerRunningTask(expectedWorker, task);
+      rtrTestUtils.mockWorkerCompleteFailedTask(expectedWorker, task);
+
+      Assert.assertTrue(taskFuture.get(TIMEOUT_SECONDS, TimeUnit.SECONDS).isFailure());
+      Assert.assertEquals(0, remoteTaskRunner.getBlackListedWorkers().size());
+      Assert.assertEquals(
+          ((i + 1) / 2),
+          remoteTaskRunner.findWorkerRunningTask(task.getId()).getContinuouslyFailedTasksCount()
+      );
+    }
+  }
+
+  /**
+   * With 2 workers and maxPercentageBlacklistWorkers(50), one worker should get blacklisted after the second failure
+   * and the second worker should never be blacklisted even after exceeding maxRetriesBeforeBlacklist.
+   */
+  @Test
+  public void testBlacklistZKWorkers50Percent() throws Exception
+  {
+    Period timeoutPeriod = Period.millis(1000);
+
+    rtrTestUtils.makeWorker("worker", 10);
+    rtrTestUtils.makeWorker("worker2", 10);
+
+    RemoteTaskRunnerConfig rtrConfig = new TestRemoteTaskRunnerConfig(timeoutPeriod);
+    rtrConfig.setMaxPercentageBlacklistWorkers(50);
+
+    makeRemoteTaskRunner(rtrConfig);
+
+    String firstWorker = null;
+    String secondWorker = null;
+
+    for (int i = 1; i < 13; i++) {
+      String taskId = StringUtils.format("rt-%d", i);
+      TestRealtimeTask task = new TestRealtimeTask(
+          taskId, new TaskResource(taskId, 1), "foo", TaskStatus.success(taskId), jsonMapper
+      );
+
+      Future<TaskStatus> taskFuture = remoteTaskRunner.run(task);
+
+      if (i == 1) {
+        if (rtrTestUtils.taskAnnounced("worker2", task.getId())) {
+          firstWorker = "worker2";
+          secondWorker = "worker";
+        } else {
+          firstWorker = "worker";
+          secondWorker = "worker2";
+        }
+      }
+
+      final String expectedWorker = i % 2 == 0 || i > 4 ? secondWorker : firstWorker;
+
+      Assert.assertTrue(rtrTestUtils.taskAnnounced(expectedWorker, task.getId()));
+      rtrTestUtils.mockWorkerRunningTask(expectedWorker, task);
+      rtrTestUtils.mockWorkerCompleteFailedTask(expectedWorker, task);
+
+      Assert.assertTrue(taskFuture.get(TIMEOUT_SECONDS, TimeUnit.SECONDS).isFailure());
+      Assert.assertEquals(i > 2 ? 1 : 0, remoteTaskRunner.getBlackListedWorkers().size());
+      Assert.assertEquals(
+          i > 4 ? i - 2 : ((i + 1) / 2),
+          remoteTaskRunner.findWorkerRunningTask(task.getId()).getContinuouslyFailedTasksCount()
+      );
+    }
+  }
+
+  @Test
+  public void testSuccessfulTaskOnBlacklistedWorker() throws Exception
+  {
+    Period timeoutPeriod = Period.millis(1000);
+    makeWorker();
+
+    RemoteTaskRunnerConfig rtrConfig = new TestRemoteTaskRunnerConfig(timeoutPeriod);
+    rtrConfig.setMaxPercentageBlacklistWorkers(100);
+
+    makeRemoteTaskRunner(rtrConfig);
+
+    TestRealtimeTask task1 = new TestRealtimeTask(
+        "realtime1", new TaskResource("realtime1", 1), "foo", TaskStatus.success("realtime1"), jsonMapper
+    );
+    TestRealtimeTask task2 = new TestRealtimeTask(
+        "realtime2", new TaskResource("realtime2", 1), "foo", TaskStatus.success("realtime2"), jsonMapper
+    );
+    TestRealtimeTask task3 = new TestRealtimeTask(
+        "realtime3", new TaskResource("realtime3", 1), "foo", TaskStatus.success("realtime3"), jsonMapper
+    );
+
+    Future<TaskStatus> taskFuture1 = remoteTaskRunner.run(task1);
+    Assert.assertTrue(taskAnnounced(task1.getId()));
+    mockWorkerRunningTask(task1);
+    mockWorkerCompleteFailedTask(task1);
+    Assert.assertTrue(taskFuture1.get(TIMEOUT_SECONDS, TimeUnit.SECONDS).isFailure());
+    Assert.assertEquals(0, remoteTaskRunner.getBlackListedWorkers().size());
+
+    Future<TaskStatus> taskFuture2 = remoteTaskRunner.run(task2);
+    Assert.assertTrue(taskAnnounced(task2.getId()));
+    mockWorkerRunningTask(task2);
+
+    Future<TaskStatus> taskFuture3 = remoteTaskRunner.run(task3);
+    Assert.assertTrue(taskAnnounced(task3.getId()));
+    mockWorkerRunningTask(task3);
+    mockWorkerCompleteFailedTask(task3);
+    Assert.assertTrue(taskFuture3.get(TIMEOUT_SECONDS, TimeUnit.SECONDS).isFailure());
+    Assert.assertEquals(1, remoteTaskRunner.getBlackListedWorkers().size());
+
+    mockWorkerCompleteSuccessfulTask(task2);
+    Assert.assertTrue(taskFuture2.get(TIMEOUT_SECONDS, TimeUnit.SECONDS).isSuccess());
+    Assert.assertEquals(0, remoteTaskRunner.getBlackListedWorkers().size());
+  }
 }

@@ -24,13 +24,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Charsets;
 import com.google.common.base.Throwables;
 import com.google.inject.Inject;
-import com.metamx.common.ISE;
 import com.metamx.http.client.HttpClient;
 import com.metamx.http.client.Request;
 import com.metamx.http.client.response.StatusResponseHandler;
 import com.metamx.http.client.response.StatusResponseHolder;
-import io.druid.guice.annotations.Global;
+import io.druid.java.util.common.ISE;
+import io.druid.java.util.common.StringUtils;
 import io.druid.testing.IntegrationTestingConfig;
+import io.druid.testing.guice.TestClient;
 import org.jboss.netty.handler.codec.http.HttpMethod;
 import org.jboss.netty.handler.codec.http.HttpResponseStatus;
 
@@ -41,27 +42,27 @@ public class ClientInfoResourceTestClient
 {
   private final ObjectMapper jsonMapper;
   private final HttpClient httpClient;
-  private final String broker;
+  private final String brokerUrl;
   private final StatusResponseHandler responseHandler;
 
   @Inject
   ClientInfoResourceTestClient(
       ObjectMapper jsonMapper,
-      @Global HttpClient httpClient,
+      @TestClient HttpClient httpClient,
       IntegrationTestingConfig config
   )
   {
     this.jsonMapper = jsonMapper;
     this.httpClient = httpClient;
-    this.broker = config.getBrokerHost();
+    this.brokerUrl = config.getBrokerUrl();
     this.responseHandler = new StatusResponseHandler(Charsets.UTF_8);
   }
 
   private String getBrokerURL()
   {
-    return String.format(
-        "http://%s/druid/v2/datasources",
-        broker
+    return StringUtils.format(
+        "%s/druid/v2/datasources",
+        brokerUrl
     );
   }
 
@@ -71,7 +72,7 @@ public class ClientInfoResourceTestClient
       StatusResponseHolder response = httpClient.go(
           new Request(
               HttpMethod.GET,
-              new URL(String.format("%s/%s/dimensions?interval=%s", getBrokerURL(), dataSource, interval))
+              new URL(StringUtils.format("%s/%s/dimensions?interval=%s", getBrokerURL(), dataSource, interval))
           ),
           responseHandler
       ).get();

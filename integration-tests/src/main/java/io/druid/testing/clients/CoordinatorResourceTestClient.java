@@ -24,21 +24,23 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Charsets;
 import com.google.common.base.Throwables;
 import com.google.inject.Inject;
-import com.metamx.common.ISE;
 import com.metamx.http.client.HttpClient;
 import com.metamx.http.client.Request;
 import com.metamx.http.client.response.StatusResponseHandler;
 import com.metamx.http.client.response.StatusResponseHolder;
-import io.druid.guice.annotations.Global;
+import io.druid.java.util.common.ISE;
+import io.druid.java.util.common.RE;
+import io.druid.java.util.common.StringUtils;
 import io.druid.testing.IntegrationTestingConfig;
+import io.druid.testing.guice.TestClient;
 import org.jboss.netty.handler.codec.http.HttpMethod;
 import org.jboss.netty.handler.codec.http.HttpResponseStatus;
 import org.joda.time.Interval;
 
 import java.net.URL;
-import java.net.URLEncoder;
-import java.util.Map;
 import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 
 public class CoordinatorResourceTestClient
 {
@@ -50,35 +52,36 @@ public class CoordinatorResourceTestClient
   @Inject
   CoordinatorResourceTestClient(
       ObjectMapper jsonMapper,
-      @Global HttpClient httpClient, IntegrationTestingConfig config
+      @TestClient HttpClient httpClient,
+      IntegrationTestingConfig config
   )
   {
     this.jsonMapper = jsonMapper;
     this.httpClient = httpClient;
-    this.coordinator = config.getCoordinatorHost();
+    this.coordinator = config.getCoordinatorUrl();
     this.responseHandler = new StatusResponseHandler(Charsets.UTF_8);
   }
 
   private String getCoordinatorURL()
   {
-    return String.format(
-        "http://%s/druid/coordinator/v1/",
+    return StringUtils.format(
+        "%s/druid/coordinator/v1/",
         coordinator
     );
   }
 
   private String getIntervalsURL(String dataSource)
   {
-    return String.format("%sdatasources/%s/intervals", getCoordinatorURL(), dataSource);
+    return StringUtils.format("%sdatasources/%s/intervals", getCoordinatorURL(), dataSource);
   }
 
   private String getLoadStatusURL()
   {
-    return String.format("%s%s", getCoordinatorURL(), "loadstatus");
+    return StringUtils.format("%s%s", getCoordinatorURL(), "loadstatus");
   }
 
   // return a list of the segment dates for the specified datasource
-  public ArrayList<String> getSegmentIntervals(final String dataSource) throws Exception
+  public List<String> getSegmentIntervals(final String dataSource) throws Exception
   {
     ArrayList<String> segments = null;
     try {
@@ -120,17 +123,10 @@ public class CoordinatorResourceTestClient
     return (status.containsKey(dataSource) && status.get(dataSource) == 100.0);
   }
 
-  public void unloadSegmentsForDataSource(String dataSource, Interval interval)
+  public void unloadSegmentsForDataSource(String dataSource)
   {
     try {
-      makeRequest(
-          HttpMethod.DELETE,
-          String.format(
-              "%sdatasources/%s",
-              getCoordinatorURL(),
-              dataSource
-          )
-      );
+      makeRequest(HttpMethod.DELETE, StringUtils.format("%sdatasources/%s", getCoordinatorURL(), dataSource));
     }
     catch (Exception e) {
       throw Throwables.propagate(e);
@@ -142,8 +138,8 @@ public class CoordinatorResourceTestClient
     try {
       makeRequest(
           HttpMethod.DELETE,
-          String.format(
-              "%sdatasources/%s/intervals/%s?kill=true",
+          StringUtils.format(
+              "%sdatasources/%s/intervals/%s",
               getCoordinatorURL(),
               dataSource, interval.toString().replace("/", "_")
           )
@@ -151,6 +147,23 @@ public class CoordinatorResourceTestClient
     }
     catch (Exception e) {
       throw Throwables.propagate(e);
+    }
+  }
+
+  public HttpResponseStatus getProxiedOverlordScalingResponseStatus()
+  {
+    try {
+      StatusResponseHolder response = makeRequest(
+          HttpMethod.GET,
+          StringUtils.format(
+              "%s/druid/indexer/v1/scaling",
+              coordinator
+          )
+      );
+      return response.getStatus();
+    }
+    catch (Exception e) {
+      throw new RE(e, "Unable to get scaling status from [%s]", coordinator);
     }
   }
 

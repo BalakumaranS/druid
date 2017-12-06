@@ -23,8 +23,10 @@ import com.fasterxml.jackson.annotation.JacksonInject;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonTypeName;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.metamx.common.concurrent.ScheduledExecutorFactory;
+
 import io.druid.guice.annotations.Json;
+import io.druid.java.util.common.concurrent.ScheduledExecutorFactory;
+import io.druid.java.util.common.logger.Logger;
 
 import javax.validation.constraints.NotNull;
 import java.io.File;
@@ -34,6 +36,8 @@ import java.io.File;
 @JsonTypeName("file")
 public class FileRequestLoggerProvider implements RequestLoggerProvider
 {
+  private static final Logger log = new Logger(FileRequestLoggerProvider.class);
+
   @JsonProperty
   @NotNull
   private File dir = null;
@@ -51,6 +55,8 @@ public class FileRequestLoggerProvider implements RequestLoggerProvider
   @Override
   public RequestLogger get()
   {
-    return new FileRequestLogger(jsonMapper, factory.create(1, "RequestLogger-%s"), dir);
+    FileRequestLogger logger = new FileRequestLogger(jsonMapper, factory.create(1, "RequestLogger-%s"), dir);
+    log.debug(new Exception("Stack trace"), "Creating %s at", logger);
+    return logger;
   }
 }

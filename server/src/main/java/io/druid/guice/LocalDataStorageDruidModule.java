@@ -20,6 +20,7 @@
 package io.druid.guice;
 
 import com.fasterxml.jackson.core.Version;
+import com.fasterxml.jackson.databind.Module;
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Binder;
 import com.google.inject.Key;
@@ -58,6 +59,10 @@ public class LocalDataStorageDruidModule implements DruidModule
         binder, "druid.storage.type", Key.get(DataSegmentPusher.class), Key.get(LocalDataSegmentPusher.class)
     );
 
+    PolyBind.createChoice(
+        binder, "druid.storage.type", Key.get(DataSegmentKiller.class), Key.get(LocalDataSegmentKiller.class)
+    );
+
     PolyBind.createChoice(binder, "druid.storage.type", Key.get(DataSegmentFinder.class), null);
   }
 
@@ -92,10 +97,10 @@ public class LocalDataStorageDruidModule implements DruidModule
   }
 
   @Override
-  public List<? extends com.fasterxml.jackson.databind.Module> getJacksonModules()
+  public List<? extends Module> getJacksonModules()
   {
     return ImmutableList.of(
-        new com.fasterxml.jackson.databind.Module()
+        new Module()
         {
           @Override
           public String getModuleName()

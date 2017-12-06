@@ -1,22 +1,20 @@
 /*
+ * Licensed to Metamarkets Group Inc. (Metamarkets) under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Metamarkets licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
  *
- *  Licensed to Metamarkets Group Inc. (Metamarkets) under one
- *  or more contributor license agreements. See the NOTICE file
- *  distributed with this work for additional information
- *  regarding copyright ownership. Metamarkets licenses this file
- *  to you under the Apache License, Version 2.0 (the
- *  "License"); you may not use this file except in compliance
- *  with the License. You may obtain a copy of the License at
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
- *
- *  Unless required by applicable law or agreed to in writing,
- *  software distributed under the License is distributed on an
- *  "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- *  KIND, either express or implied. See the License for the
- *  specific language governing permissions and limitations
- *  under the License.
- *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package io.druid.query.extraction;
@@ -24,14 +22,14 @@ package io.druid.query.extraction;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonTypeName;
 import com.google.common.base.Strings;
-import com.metamx.common.StringUtils;
+import io.druid.java.util.common.StringUtils;
 
 import javax.annotation.Nullable;
 import java.nio.ByteBuffer;
 import java.util.Locale;
 
 @JsonTypeName("lower")
-public class LowerExtractionFn implements ExtractionFn
+public class LowerExtractionFn extends DimExtractionFn
 {
   private final Locale locale;
 
@@ -52,18 +50,12 @@ public class LowerExtractionFn implements ExtractionFn
 
   @Nullable
   @Override
-  public String apply(String key)
+  public String apply(@Nullable String key)
   {
     if (Strings.isNullOrEmpty(key)) {
       return null;
     }
     return key.toLowerCase(locale);
-  }
-
-  @Override
-  public String apply(long value)
-  {
-    return apply(String.valueOf(value));
   }
 
   @Override
@@ -87,11 +79,5 @@ public class LowerExtractionFn implements ExtractionFn
                      .put((byte) 0XFF)
                      .put(localeBytes)
                      .array();
-  }
-
-  @Override
-  public String apply(Object value)
-  {
-    return apply(String.valueOf(value));
   }
 }

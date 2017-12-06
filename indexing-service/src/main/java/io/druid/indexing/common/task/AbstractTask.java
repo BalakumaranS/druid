@@ -26,14 +26,17 @@ import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
 import io.druid.indexing.common.TaskLock;
 import io.druid.indexing.common.TaskStatus;
-import io.druid.indexing.common.TaskToolbox;
 import io.druid.indexing.common.actions.LockListAction;
+import io.druid.indexing.common.actions.TaskActionClient;
+import io.druid.java.util.common.DateTimes;
 import io.druid.query.Query;
 import io.druid.query.QueryRunner;
-import org.joda.time.DateTime;
 import org.joda.time.Interval;
 
+import javax.annotation.Nullable;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 public abstract class AbstractTask implements Task
@@ -56,32 +59,45 @@ public abstract class AbstractTask implements Task
 
   protected AbstractTask(String id, String dataSource, Map<String, Object> context)
   {
-    this(id, id, new TaskResource(id, 1), dataSource, context);
+    this(id, null, null, dataSource, context);
   }
 
-  protected AbstractTask(String id, String groupId, String dataSource, Map<String, Object> context)
-  {
-    this(id, groupId, new TaskResource(id, 1), dataSource, context);
-  }
-
-  protected AbstractTask(String id, String groupId, TaskResource taskResource, String dataSource, Map<String, Object> context)
+  protected AbstractTask(
+      String id,
+      String groupId,
+      TaskResource taskResource,
+      String dataSource,
+      Map<String, Object> context
+  )
   {
     this.id = Preconditions.checkNotNull(id, "id");
-    this.groupId = Preconditions.checkNotNull(groupId, "groupId");
-    this.taskResource = Preconditions.checkNotNull(taskResource, "resource");
+    this.groupId = groupId == null ? id : groupId;
+    this.taskResource = taskResource == null ? new TaskResource(id, 1) : taskResource;
     this.dataSource = Preconditions.checkNotNull(dataSource, "dataSource");
     this.context = context;
   }
 
-  public static String makeId(String id, final String typeName, String dataSource, Interval interval)
+  static String getOrMakeId(String id, final String typeName, String dataSource)
   {
-    return id != null ? id : joinId(
-        typeName,
-        dataSource,
-        interval.getStart(),
-        interval.getEnd(),
-        new DateTime().toString()
-    );
+    return getOrMakeId(id, typeName, dataSource, null);
+  }
+
+  static String getOrMakeId(String id, final String typeName, String dataSource, @Nullable Interval interval)
+  {
+    if (id != null) {
+      return id;
+    }
+
+    final List<Object> objects = new ArrayList<>();
+    objects.add(typeName);
+    objects.add(dataSource);
+    if (interval != null) {
+      objects.add(interval.getStart());
+      objects.add(interval.getEnd());
+    }
+    objects.add(DateTimes.nowUtc().toString());
+
+    return joinId(objects);
   }
 
   @JsonProperty
@@ -160,7 +176,12 @@ public abstract class AbstractTask implements Task
    *
    * @return string of joined objects
    */
-  public static String joinId(Object... objects)
+  static String joinId(List<Object> objects)
+  {
+    return ID_JOINER.join(objects);
+  }
+
+  static String joinId(Object...objects)
   {
     return ID_JOINER.join(objects);
   }
@@ -195,9 +216,9 @@ public abstract class AbstractTask implements Task
     return id.hashCode();
   }
 
-  protected Iterable<TaskLock> getTaskLocks(TaskToolbox toolbox) throws IOException
+  static List<TaskLock> getTaskLocks(TaskActionClient client) throws IOException
   {
-    return toolbox.getTaskActionClient().submit(new LockListAction());
+    return client.submit(new LockListAction());
   }
 
   @Override
@@ -206,11 +227,4 @@ public abstract class AbstractTask implements Task
   {
     return context;
   }
-
-  @Override
-  public Object getContextValue(String key)
-  {
-    return context == null ? null : context.get(key);
-  }
-
 }

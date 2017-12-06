@@ -22,8 +22,10 @@ package io.druid.query.extraction;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
-import com.metamx.common.StringUtils;
+import com.google.common.base.Strings;
+import io.druid.java.util.common.StringUtils;
 
+import javax.annotation.Nullable;
 import java.nio.ByteBuffer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -56,10 +58,15 @@ public class MatchingDimExtractionFn extends DimExtractionFn
                      .array();
   }
 
+  @Nullable
   @Override
-  public String apply(String dimValue)
+  public String apply(@Nullable String dimValue)
   {
-    dimValue = (dimValue == null) ? "" : dimValue;
+    if (Strings.isNullOrEmpty(dimValue)) {
+      // We'd return null whether or not the pattern matched
+      return null;
+    }
+
     Matcher matcher = pattern.matcher(dimValue);
     return matcher.find() ? dimValue : null;
   }
@@ -85,7 +92,7 @@ public class MatchingDimExtractionFn extends DimExtractionFn
   @Override
   public String toString()
   {
-    return String.format("regex_matches(%s)", expr);
+    return StringUtils.format("regex_matches(%s)", expr);
   }
 
   @Override

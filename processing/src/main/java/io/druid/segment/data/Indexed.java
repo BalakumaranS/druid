@@ -19,10 +19,28 @@
 
 package io.druid.segment.data;
 
-public interface Indexed<T> extends Iterable<T>
+import io.druid.guice.annotations.PublicApi;
+import io.druid.query.monomorphicprocessing.CalledFromHotLoop;
+import io.druid.query.monomorphicprocessing.HotLoopCallee;
+
+@PublicApi
+public interface Indexed<T> extends Iterable<T>, HotLoopCallee
 {
   Class<? extends T> getClazz();
+
   int size();
+
+  @CalledFromHotLoop
   T get(int index);
+
+  /**
+   * Returns the index of "value" in this Indexed object, or a negative number if the value is not present.
+   * The negative number is not guaranteed to be any particular number. Subclasses may tighten this contract
+   * (GenericIndexed does this).
+   *
+   * @param value value to search for
+   *
+   * @return index of value, or a negative number
+   */
   int indexOf(T value);
 }

@@ -23,12 +23,13 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import io.druid.curator.CuratorUtils;
 import org.joda.time.Period;
 
+import javax.validation.constraints.Max;
 import javax.validation.constraints.Min;
 import javax.validation.constraints.NotNull;
 
 /**
  */
-public class RemoteTaskRunnerConfig
+public class RemoteTaskRunnerConfig extends WorkerTaskRunnerConfig
 {
   @JsonProperty
   @NotNull
@@ -39,28 +40,41 @@ public class RemoteTaskRunnerConfig
   private Period taskCleanupTimeout = new Period("PT15M");
 
   @JsonProperty
-  private String minWorkerVersion = "0";
-
-  @JsonProperty
   @Min(10 * 1024)
   private int maxZnodeBytes = CuratorUtils.DEFAULT_MAX_ZNODE_BYTES;
 
   @JsonProperty
   private Period taskShutdownLinkTimeout = new Period("PT1M");
 
+  @JsonProperty
+  @Min(1)
+  private int pendingTasksRunnerNumThreads = 1;
+
+  @JsonProperty
+  @Min(1)
+  private int maxRetriesBeforeBlacklist = 5;
+
+  @JsonProperty
+  @NotNull
+  private Period workerBlackListBackoffTime = new Period("PT15M");
+
+  @JsonProperty
+  @NotNull
+  private Period workerBlackListCleanupPeriod = new Period("PT5M");
+
+  @JsonProperty
+  @Max(100)
+  @Min(0)
+  private int maxPercentageBlacklistWorkers = 20;
+
   public Period getTaskAssignmentTimeout()
   {
     return taskAssignmentTimeout;
   }
 
-  @JsonProperty
-  public Period getTaskCleanupTimeout(){
-    return taskCleanupTimeout;
-  }
-
-  public String getMinWorkerVersion()
+  public Period getTaskCleanupTimeout()
   {
-    return minWorkerVersion;
+    return taskCleanupTimeout;
   }
 
   public int getMaxZnodeBytes()
@@ -71,5 +85,127 @@ public class RemoteTaskRunnerConfig
   public Period getTaskShutdownLinkTimeout()
   {
     return taskShutdownLinkTimeout;
+  }
+
+
+  public int getPendingTasksRunnerNumThreads()
+  {
+    return pendingTasksRunnerNumThreads;
+  }
+
+  public int getMaxRetriesBeforeBlacklist()
+  {
+    return maxRetriesBeforeBlacklist;
+  }
+
+  public void setMaxRetriesBeforeBlacklist(int maxRetriesBeforeBlacklist)
+  {
+    this.maxRetriesBeforeBlacklist = maxRetriesBeforeBlacklist;
+  }
+
+  public Period getWorkerBlackListBackoffTime()
+  {
+    return workerBlackListBackoffTime;
+  }
+
+  public void setWorkerBlackListBackoffTime(Period taskBlackListBackoffTime)
+  {
+    this.workerBlackListBackoffTime = taskBlackListBackoffTime;
+  }
+
+  public Period getWorkerBlackListCleanupPeriod()
+  {
+    return workerBlackListCleanupPeriod;
+  }
+
+  public void setWorkerBlackListCleanupPeriod(Period workerBlackListCleanupPeriod)
+  {
+    this.workerBlackListCleanupPeriod = workerBlackListCleanupPeriod;
+  }
+
+  public int getMaxPercentageBlacklistWorkers()
+  {
+    return maxPercentageBlacklistWorkers;
+  }
+
+  public void setMaxPercentageBlacklistWorkers(int maxPercentageBlacklistWorkers)
+  {
+    this.maxPercentageBlacklistWorkers = maxPercentageBlacklistWorkers;
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+
+    RemoteTaskRunnerConfig that = (RemoteTaskRunnerConfig) o;
+
+    if (maxZnodeBytes != that.maxZnodeBytes) {
+      return false;
+    }
+    if (pendingTasksRunnerNumThreads != that.pendingTasksRunnerNumThreads) {
+      return false;
+    }
+    if (!taskAssignmentTimeout.equals(that.taskAssignmentTimeout)) {
+      return false;
+    }
+    if (!taskCleanupTimeout.equals(that.taskCleanupTimeout)) {
+      return false;
+    }
+    if (!getMinWorkerVersion().equals(that.getMinWorkerVersion())) {
+      return false;
+    }
+    if (!taskShutdownLinkTimeout.equals(that.taskShutdownLinkTimeout)) {
+      return false;
+    }
+    if (maxRetriesBeforeBlacklist != that.maxRetriesBeforeBlacklist) {
+      return false;
+    }
+    if (!workerBlackListBackoffTime.equals(that.getWorkerBlackListBackoffTime())) {
+      return false;
+    }
+    if (maxPercentageBlacklistWorkers != that.maxPercentageBlacklistWorkers) {
+      return false;
+    }
+    return workerBlackListCleanupPeriod.equals(that.workerBlackListCleanupPeriod);
+
+  }
+
+  @Override
+  public int hashCode()
+  {
+    int result = taskAssignmentTimeout.hashCode();
+    result = 31 * result + taskCleanupTimeout.hashCode();
+    result = 31 * result + getMinWorkerVersion().hashCode();
+    result = 31 * result + maxZnodeBytes;
+    result = 31 * result + taskShutdownLinkTimeout.hashCode();
+    result = 31 * result + pendingTasksRunnerNumThreads;
+    result = 31 * result + maxRetriesBeforeBlacklist;
+    result = 31 * result + workerBlackListBackoffTime.hashCode();
+    result = 31 * result + workerBlackListCleanupPeriod.hashCode();
+    result = 31 * result + maxPercentageBlacklistWorkers;
+    return result;
+  }
+
+  @Override
+  public String toString()
+  {
+    return "RemoteTaskRunnerConfig{" +
+           "taskAssignmentTimeout=" + taskAssignmentTimeout +
+           ", taskCleanupTimeout=" + taskCleanupTimeout +
+           ", minWorkerVersion='" + getMinWorkerVersion() + '\'' +
+           ", maxZnodeBytes=" + maxZnodeBytes +
+           ", taskShutdownLinkTimeout=" + taskShutdownLinkTimeout +
+           ", pendingTasksRunnerNumThreads=" + pendingTasksRunnerNumThreads +
+           ", maxRetriesBeforeBlacklist=" + maxRetriesBeforeBlacklist +
+           ", taskBlackListBackoffTimeMillis=" + workerBlackListBackoffTime +
+           ", taskBlackListCleanupPeriod=" + workerBlackListCleanupPeriod +
+           ", maxPercentageBlacklistWorkers= " + maxPercentageBlacklistWorkers +
+           '}';
   }
 }

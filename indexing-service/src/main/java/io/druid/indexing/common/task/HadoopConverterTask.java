@@ -26,17 +26,20 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
-import com.metamx.common.UOE;
-import com.metamx.common.logger.Logger;
+
 import io.druid.indexer.updater.HadoopConverterJob;
 import io.druid.indexer.updater.HadoopDruidConverterConfig;
 import io.druid.indexing.common.TaskStatus;
 import io.druid.indexing.common.TaskToolbox;
 import io.druid.indexing.common.actions.TaskActionClient;
+import io.druid.java.util.common.UOE;
+import io.druid.java.util.common.logger.Logger;
+import io.druid.segment.writeout.SegmentWriteOutMediumFactory;
 import io.druid.segment.IndexSpec;
 import io.druid.timeline.DataSegment;
 import org.joda.time.Interval;
 
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.net.URI;
 import java.util.Arrays;
@@ -51,6 +54,12 @@ public class HadoopConverterTask extends ConvertSegmentTask
   private static final String TYPE = "hadoop_convert_segment";
   private static final Logger log = new Logger(HadoopConverterTask.class);
 
+  private final List<String> hadoopDependencyCoordinates;
+  private final URI distributedSuccessCache;
+  private final String jobPriority;
+  private final String segmentOutputPath;
+  private final String classpathPrefix;
+
   @JsonCreator
   public HadoopConverterTask(
       @JsonProperty("id") String id,
@@ -64,11 +73,12 @@ public class HadoopConverterTask extends ConvertSegmentTask
       @JsonProperty("jobPriority") String jobPriority,
       @JsonProperty("segmentOutputPath") String segmentOutputPath,
       @JsonProperty("classpathPrefix") String classpathPrefix,
+      @JsonProperty("segmentWriteOutMediumFactory") @Nullable SegmentWriteOutMediumFactory segmentWriteOutMediumFactory,
       @JsonProperty("context") Map<String, Object> context
   )
   {
     super(
-        makeId(
+        getOrMakeId(
             id,
             TYPE,
             Preconditions.checkNotNull(dataSource, "dataSource"),
@@ -80,6 +90,7 @@ public class HadoopConverterTask extends ConvertSegmentTask
         indexSpec,
         force,
         validate == null ? true : validate,
+        segmentWriteOutMediumFactory,
         context
     );
     this.hadoopDependencyCoordinates = hadoopDependencyCoordinates;
@@ -88,12 +99,6 @@ public class HadoopConverterTask extends ConvertSegmentTask
     this.jobPriority = jobPriority;
     this.classpathPrefix = classpathPrefix;
   }
-
-  private final List<String> hadoopDependencyCoordinates;
-  private final URI distributedSuccessCache;
-  private final String jobPriority;
-  private final String segmentOutputPath;
-  private final String classpathPrefix;
 
   @JsonProperty
   public List<String> getHadoopDependencyCoordinates()
@@ -249,11 +254,13 @@ public class HadoopConverterTask extends ConvertSegmentTask
           }
       );
       log.debug("Found new segments %s", Arrays.toString(finishedSegments.toArray()));
-      toolbox.pushSegments(finishedSegments);
+      toolbox.publishSegments(finishedSegments);
       return success();
     }
   }
 
+  /** Called indirectly in {@link ConverterSubTask#run(TaskToolbox)}. */
+  @SuppressWarnings("unused")
   public static class JobInvoker
   {
     public static String runTask(String[] input)

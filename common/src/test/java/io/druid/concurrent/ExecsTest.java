@@ -21,7 +21,10 @@ package io.druid.concurrent;
 
 import com.google.common.base.Throwables;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
-import com.metamx.common.logger.Logger;
+
+import io.druid.java.util.common.concurrent.Execs;
+import io.druid.java.util.common.logger.Logger;
+
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -69,11 +72,12 @@ public class ExecsTest
     producer.submit(
         new Runnable()
         {
+          @Override
           public void run()
           {
             for (int i = 0; i < nTasks; i++) {
               final int taskID = i;
-              System.out.println("Produced task" + taskID);
+              log.info("Produced task %d", taskID);
               blockingExecutor.submit(
                   new Runnable()
                   {

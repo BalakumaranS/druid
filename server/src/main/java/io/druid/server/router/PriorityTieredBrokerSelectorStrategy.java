@@ -22,9 +22,8 @@ package io.druid.server.router;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Optional;
-import com.google.common.collect.Iterables;
-import io.druid.query.BaseQuery;
 import io.druid.query.Query;
+import io.druid.query.QueryContexts;
 
 /**
  */
@@ -46,21 +45,11 @@ public class PriorityTieredBrokerSelectorStrategy implements TieredBrokerSelecto
   @Override
   public Optional<String> getBrokerServiceName(TieredBrokerConfig tierConfig, Query query)
   {
-    final int priority = BaseQuery.getContextPriority(query, 0);
+    final int priority = QueryContexts.getPriority(query);
 
-    if (priority < minPriority) {
+    if (priority < minPriority || priority > maxPriority) {
       return Optional.of(
-          Iterables.getLast(
-              tierConfig.getTierToBrokerMap().values(),
-              tierConfig.getDefaultBrokerServiceName()
-          )
-      );
-    } else if (priority >= maxPriority) {
-      return Optional.of(
-          Iterables.getFirst(
-              tierConfig.getTierToBrokerMap().values(),
-              tierConfig.getDefaultBrokerServiceName()
-          )
+          tierConfig.getDefaultBrokerServiceName()
       );
     }
 

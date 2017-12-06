@@ -23,33 +23,41 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
-import io.druid.common.utils.JodaUtils;
-import io.druid.granularity.QueryGranularity;
+import io.druid.java.util.common.JodaUtils;
+import io.druid.java.util.common.granularity.Granularity;
 import io.druid.query.filter.DimFilter;
+import io.druid.segment.transform.TransformSpec;
+import io.druid.timeline.DataSegment;
 import org.joda.time.Interval;
 
 import java.util.List;
+import java.util.Objects;
 
 public class DatasourceIngestionSpec
 {
   private final String dataSource;
   private final List<Interval> intervals;
+  private final List<DataSegment> segments;
   private final DimFilter filter;
-  private final QueryGranularity granularity;
   private final List<String> dimensions;
   private final List<String> metrics;
   private final boolean ignoreWhenNoSegments;
+
+  // Note that the only purpose of the transformSpec field is to hold the value from the overall dataSchema.
+  // It is not meant to be provided by end users, and will be overwritten.
+  private final TransformSpec transformSpec;
 
   @JsonCreator
   public DatasourceIngestionSpec(
       @JsonProperty("dataSource") String dataSource,
       @Deprecated @JsonProperty("interval") Interval interval,
       @JsonProperty("intervals") List<Interval> intervals,
+      @JsonProperty("segments") List<DataSegment> segments,
       @JsonProperty("filter") DimFilter filter,
-      @JsonProperty("granularity") QueryGranularity granularity,
       @JsonProperty("dimensions") List<String> dimensions,
       @JsonProperty("metrics") List<String> metrics,
-      @JsonProperty("ignoreWhenNoSegments") boolean ignoreWhenNoSegments
+      @JsonProperty("ignoreWhenNoSegments") boolean ignoreWhenNoSegments,
+      @JsonProperty("transformSpec") TransformSpec transformSpec
   )
   {
     this.dataSource = Preconditions.checkNotNull(dataSource, "null dataSource");
@@ -58,7 +66,7 @@ public class DatasourceIngestionSpec
         interval == null || intervals == null,
         "please specify intervals only"
     );
-    
+
     List<Interval> theIntervals = null;
     if (interval != null) {
       theIntervals = ImmutableList.of(interval);
@@ -67,13 +75,17 @@ public class DatasourceIngestionSpec
     }
     this.intervals = Preconditions.checkNotNull(theIntervals, "no intervals found");
 
-    this.filter = filter;
-    this.granularity = granularity == null ? QueryGranularity.NONE : granularity;
+    // note that it is important to have intervals even if user explicitly specifies the list of
+    // segments, because segment list's min/max boundaries might not align the intended interval
+    // to read in all cases.
+    this.segments = segments;
 
+    this.filter = filter;
     this.dimensions = dimensions;
     this.metrics = metrics;
 
     this.ignoreWhenNoSegments = ignoreWhenNoSegments;
+    this.transformSpec = transformSpec != null ? transformSpec : TransformSpec.NONE;
   }
 
   @JsonProperty
@@ -89,15 +101,15 @@ public class DatasourceIngestionSpec
   }
 
   @JsonProperty
-  public DimFilter getFilter()
+  public List<DataSegment> getSegments()
   {
-    return filter;
+    return segments;
   }
 
   @JsonProperty
-  public QueryGranularity getGranularity()
+  public DimFilter getFilter()
   {
-    return granularity;
+    return filter;
   }
 
   @JsonProperty
@@ -118,17 +130,24 @@ public class DatasourceIngestionSpec
     return ignoreWhenNoSegments;
   }
 
+  @JsonProperty
+  public TransformSpec getTransformSpec()
+  {
+    return transformSpec;
+  }
+
   public DatasourceIngestionSpec withDimensions(List<String> dimensions)
   {
     return new DatasourceIngestionSpec(
         dataSource,
         null,
         intervals,
+        segments,
         filter,
-        granularity,
         dimensions,
         metrics,
-        ignoreWhenNoSegments
+        ignoreWhenNoSegments,
+        transformSpec
     );
   }
 
@@ -138,25 +157,27 @@ public class DatasourceIngestionSpec
         dataSource,
         null,
         intervals,
+        segments,
         filter,
-        granularity,
         dimensions,
         metrics,
-        ignoreWhenNoSegments
+        ignoreWhenNoSegments,
+        transformSpec
     );
   }
 
-  public DatasourceIngestionSpec withQueryGranularity(QueryGranularity granularity)
+  public DatasourceIngestionSpec withQueryGranularity(Granularity granularity)
   {
     return new DatasourceIngestionSpec(
         dataSource,
         null,
         intervals,
+        segments,
         filter,
-        granularity,
         dimensions,
         metrics,
-        ignoreWhenNoSegments
+        ignoreWhenNoSegments,
+        transformSpec
     );
   }
 
@@ -166,16 +187,32 @@ public class DatasourceIngestionSpec
         dataSource,
         null,
         intervals,
+        segments,
         filter,
-        granularity,
         dimensions,
         metrics,
-        ignoreWhenNoSegments
+        ignoreWhenNoSegments,
+        transformSpec
+    );
+  }
+
+  public DatasourceIngestionSpec withTransformSpec(TransformSpec transformSpec)
+  {
+    return new DatasourceIngestionSpec(
+        dataSource,
+        null,
+        intervals,
+        segments,
+        filter,
+        dimensions,
+        metrics,
+        ignoreWhenNoSegments,
+        transformSpec
     );
   }
 
   @Override
-  public boolean equals(Object o)
+  public boolean equals(final Object o)
   {
     if (this == o) {
       return true;
@@ -183,42 +220,30 @@ public class DatasourceIngestionSpec
     if (o == null || getClass() != o.getClass()) {
       return false;
     }
-
-    DatasourceIngestionSpec that = (DatasourceIngestionSpec) o;
-
-    if (ignoreWhenNoSegments != that.ignoreWhenNoSegments) {
-      return false;
-    }
-    if (!dataSource.equals(that.dataSource)) {
-      return false;
-    }
-    if (!intervals.equals(that.intervals)) {
-      return false;
-    }
-    if (filter != null ? !filter.equals(that.filter) : that.filter != null) {
-      return false;
-    }
-    if (!granularity.equals(that.granularity)) {
-      return false;
-    }
-    if (dimensions != null ? !dimensions.equals(that.dimensions) : that.dimensions != null) {
-      return false;
-    }
-    return !(metrics != null ? !metrics.equals(that.metrics) : that.metrics != null);
-
+    final DatasourceIngestionSpec that = (DatasourceIngestionSpec) o;
+    return ignoreWhenNoSegments == that.ignoreWhenNoSegments &&
+           Objects.equals(dataSource, that.dataSource) &&
+           Objects.equals(intervals, that.intervals) &&
+           Objects.equals(segments, that.segments) &&
+           Objects.equals(filter, that.filter) &&
+           Objects.equals(dimensions, that.dimensions) &&
+           Objects.equals(metrics, that.metrics) &&
+           Objects.equals(transformSpec, that.transformSpec);
   }
 
   @Override
   public int hashCode()
   {
-    int result = dataSource.hashCode();
-    result = 31 * result + intervals.hashCode();
-    result = 31 * result + (filter != null ? filter.hashCode() : 0);
-    result = 31 * result + granularity.hashCode();
-    result = 31 * result + (dimensions != null ? dimensions.hashCode() : 0);
-    result = 31 * result + (metrics != null ? metrics.hashCode() : 0);
-    result = 31 * result + (ignoreWhenNoSegments ? 1 : 0);
-    return result;
+    return Objects.hash(
+        dataSource,
+        intervals,
+        segments,
+        filter,
+        dimensions,
+        metrics,
+        ignoreWhenNoSegments,
+        transformSpec
+    );
   }
 
   @Override
@@ -227,11 +252,12 @@ public class DatasourceIngestionSpec
     return "DatasourceIngestionSpec{" +
            "dataSource='" + dataSource + '\'' +
            ", intervals=" + intervals +
+           ", segments=" + segments +
            ", filter=" + filter +
-           ", granularity=" + granularity +
            ", dimensions=" + dimensions +
            ", metrics=" + metrics +
            ", ignoreWhenNoSegments=" + ignoreWhenNoSegments +
+           ", transformSpec=" + transformSpec +
            '}';
   }
 }

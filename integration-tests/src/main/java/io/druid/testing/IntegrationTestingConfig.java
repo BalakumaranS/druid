@@ -23,21 +23,23 @@ package io.druid.testing;
  */
 public interface IntegrationTestingConfig
 {
-  public String getCoordinatorHost();
+  String getCoordinatorUrl();
 
-  public String getIndexerHost();
+  String getIndexerUrl();
 
-  public String getRouterHost();
+  String getRouterUrl();
 
-  public String getBrokerHost();
+  String getBrokerUrl();
 
-  public String getHistoricalHost();
+  String getMiddleManagerHost();
 
-  public String getMiddleManagerHost();
+  String getZookeeperHosts();
 
-  public String getZookeeperHosts();
+  String getKafkaHost();
 
-  public String getKafkaHost();
+  String getProperty(String prop);
 
-  public String getProperty(String prop);
+  String getUsername();
+
+  String getPassword();
 }

@@ -21,16 +21,20 @@ package io.druid.metadata;
 
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
+import io.druid.guice.annotations.ExtensionPoint;
 
 
 /**
- * Implement this for different ways to (optionally securely) access db passwords.
+ * Implement this for different ways to (optionally securely) access secrets.
  */
-@JsonTypeInfo(use= JsonTypeInfo.Id.NAME, property="type", defaultImpl = DefaultPasswordProvider.class)
-@JsonSubTypes(value={
-    @JsonSubTypes.Type(name="default", value=DefaultPasswordProvider.class),
+@ExtensionPoint
+@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type", defaultImpl = DefaultPasswordProvider.class)
+@JsonSubTypes(value = {
+    @JsonSubTypes.Type(name = "default", value = DefaultPasswordProvider.class),
+    @JsonSubTypes.Type(name = "environment", value = EnvironmentVariablePasswordProvider.class),
+
 })
-public interface PasswordProvider 
+public interface PasswordProvider
 {
-  public String getPassword();
+  String getPassword();
 }

@@ -29,8 +29,6 @@ import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
-import com.metamx.common.logger.Logger;
-import io.druid.common.utils.JodaUtils;
 import io.druid.indexer.HadoopDruidDetermineConfigurationJob;
 import io.druid.indexer.HadoopDruidIndexerConfig;
 import io.druid.indexer.HadoopDruidIndexerJob;
@@ -38,14 +36,18 @@ import io.druid.indexer.HadoopIngestionSpec;
 import io.druid.indexer.Jobby;
 import io.druid.indexer.MetadataStorageUpdaterJobHandler;
 import io.druid.indexing.common.TaskLock;
+import io.druid.indexing.common.TaskLockType;
 import io.druid.indexing.common.TaskStatus;
 import io.druid.indexing.common.TaskToolbox;
 import io.druid.indexing.common.actions.LockAcquireAction;
 import io.druid.indexing.common.actions.LockTryAcquireAction;
 import io.druid.indexing.common.actions.TaskActionClient;
 import io.druid.indexing.hadoop.OverlordActionBasedUsedSegmentLister;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.JodaUtils;
+import io.druid.java.util.common.StringUtils;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.timeline.DataSegment;
-import org.joda.time.DateTime;
 import org.joda.time.Interval;
 
 import java.util.List;
@@ -73,7 +75,7 @@ public class HadoopIndexTask extends HadoopTask
   /**
    * @param spec is used by the HadoopDruidIndexerJob to set up the appropriate parameters
    *             for creating Druid index segments. It may be modified.
-   *             <p>
+   *             <p/>
    *             Here, we will ensure that the DbConnectorConfig field of the spec is set to null, such that the
    *             job does not push a list of published segments the database. Instead, we will use the method
    *             IndexGeneratorJob.getPublishedSegments() to simply return a list of the published
@@ -92,7 +94,7 @@ public class HadoopIndexTask extends HadoopTask
   )
   {
     super(
-        id != null ? id : String.format("index_hadoop_%s_%s", getTheDataSource(spec), new DateTime()),
+        id != null ? id : StringUtils.format("index_hadoop_%s_%s", getTheDataSource(spec), DateTimes.nowUtc()),
         getTheDataSource(spec),
         hadoopDependencyCoordinates == null
         ? (hadoopCoordinates == null ? null : ImmutableList.of(hadoopCoordinates))
@@ -119,6 +121,12 @@ public class HadoopIndexTask extends HadoopTask
   }
 
   @Override
+  public int getPriority()
+  {
+    return getContextValue(Tasks.PRIORITY_KEY, Tasks.DEFAULT_BATCH_INDEX_TASK_PRIORITY);
+  }
+
+  @Override
   public String getType()
   {
     return "index_hadoop";
@@ -134,7 +142,7 @@ public class HadoopIndexTask extends HadoopTask
               intervals.get()
           )
       );
-      return taskActionClient.submit(new LockTryAcquireAction(interval)) != null;
+      return taskActionClient.submit(new LockTryAcquireAction(TaskLockType.EXCLUSIVE, interval)) != null;
     } else {
       return true;
     }
@@ -146,6 +154,7 @@ public class HadoopIndexTask extends HadoopTask
     return spec;
   }
 
+  @Override
   @JsonProperty
   public List<String> getHadoopDependencyCoordinates()
   {
@@ -177,7 +186,7 @@ public class HadoopIndexTask extends HadoopTask
         new String[]{
             toolbox.getObjectMapper().writeValueAsString(spec),
             toolbox.getConfig().getHadoopWorkingPath(),
-            toolbox.getSegmentPusher().getPathForHadoop(getDataSource())
+            toolbox.getSegmentPusher().getPathForHadoop()
         },
         loader
     );
@@ -188,19 +197,40 @@ public class HadoopIndexTask extends HadoopTask
 
 
     // We should have a lock from before we started running only if interval was specified
-    final String version;
+    String version;
     if (determineIntervals) {
       Interval interval = JodaUtils.umbrellaInterval(
           JodaUtils.condenseIntervals(
               indexerSchema.getDataSchema().getGranularitySpec().bucketIntervals().get()
           )
       );
-      TaskLock lock = toolbox.getTaskActionClient().submit(new LockAcquireAction(interval));
+      final long lockTimeoutMs = getContextValue(Tasks.LOCK_TIMEOUT_KEY, Tasks.DEFAULT_LOCK_TIMEOUT);
+      // Note: if lockTimeoutMs is larger than ServerConfig.maxIdleTime, the below line can incur http timeout error.
+      final TaskLock lock = Preconditions.checkNotNull(
+          toolbox.getTaskActionClient().submit(
+              new LockAcquireAction(TaskLockType.EXCLUSIVE, interval, lockTimeoutMs)
+          ),
+          "Cannot acquire a lock for interval[%s]", interval
+      );
       version = lock.getVersion();
     } else {
-      Iterable<TaskLock> locks = getTaskLocks(toolbox);
+      Iterable<TaskLock> locks = getTaskLocks(toolbox.getTaskActionClient());
       final TaskLock myLock = Iterables.getOnlyElement(locks);
       version = myLock.getVersion();
+    }
+
+    final String specVersion = indexerSchema.getTuningConfig().getVersion();
+    if (indexerSchema.getTuningConfig().isUseExplicitVersion()) {
+      if (specVersion.compareTo(version) < 0) {
+        version = specVersion;
+      } else {
+        log.error(
+            "Spec version can not be greater than or equal to the lock version, Spec version: [%s] Lock version: [%s].",
+            specVersion,
+            version
+        );
+        return TaskStatus.failure(getId());
+      }
     }
 
     log.info("Setting version to: %s", version);
@@ -222,13 +252,15 @@ public class HadoopIndexTask extends HadoopTask
           }
       );
 
-      toolbox.pushSegments(publishedSegments);
+      toolbox.publishSegments(publishedSegments);
       return TaskStatus.success(getId());
     } else {
       return TaskStatus.failure(getId());
     }
   }
 
+  /** Called indirectly in {@link HadoopIndexTask#run(TaskToolbox)}. */
+  @SuppressWarnings("unused")
   public static class HadoopIndexGeneratorInnerProcessing
   {
     public static String runTask(String[] args) throws Exception
@@ -266,6 +298,8 @@ public class HadoopIndexTask extends HadoopTask
     }
   }
 
+  /** Called indirectly in {@link HadoopIndexTask#run(TaskToolbox)}. */
+  @SuppressWarnings("unused")
   public static class HadoopDetermineConfigInnerProcessing
   {
     public static String runTask(String[] args) throws Exception

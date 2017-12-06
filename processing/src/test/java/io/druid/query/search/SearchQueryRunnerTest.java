@@ -19,25 +19,45 @@
 
 package io.druid.query.search;
 
+import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
-import com.metamx.common.guava.Sequences;
+import io.druid.data.input.MapBasedInputRow;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.Intervals;
+import io.druid.java.util.common.guava.Sequence;
+import io.druid.java.util.common.guava.Sequences;
+import io.druid.java.util.common.logger.Logger;
+import io.druid.js.JavaScriptConfig;
 import io.druid.query.Druids;
+import io.druid.query.Query;
+import io.druid.query.QueryPlus;
 import io.druid.query.QueryRunner;
+import io.druid.query.QueryRunnerFactory;
 import io.druid.query.QueryRunnerTestHelper;
 import io.druid.query.Result;
+import io.druid.query.aggregation.Aggregator;
+import io.druid.query.dimension.DefaultDimensionSpec;
 import io.druid.query.dimension.ExtractionDimensionSpec;
-import io.druid.query.extraction.LookupExtractionFn;
+import io.druid.query.extraction.ExtractionFn;
+import io.druid.query.extraction.JavaScriptExtractionFn;
 import io.druid.query.extraction.MapLookupExtractor;
+import io.druid.query.extraction.TimeFormatExtractionFn;
+import io.druid.query.filter.AndDimFilter;
 import io.druid.query.filter.DimFilter;
 import io.druid.query.filter.ExtractionDimFilter;
-import io.druid.query.search.search.FragmentSearchQuerySpec;
-import io.druid.query.search.search.SearchHit;
-import io.druid.query.search.search.SearchQuery;
-import io.druid.query.search.search.SearchQueryConfig;
-import org.joda.time.DateTime;
+import io.druid.query.filter.OrDimFilter;
+import io.druid.query.filter.SelectorDimFilter;
+import io.druid.query.lookup.LookupExtractionFn;
+import io.druid.query.ordering.StringComparators;
+import io.druid.query.spec.MultipleIntervalSegmentSpec;
+import io.druid.segment.QueryableIndexSegment;
+import io.druid.segment.TestHelper;
+import io.druid.segment.TestIndex;
+import io.druid.segment.column.Column;
+import io.druid.segment.column.ValueType;
+import io.druid.segment.incremental.IncrementalIndex;
+import io.druid.segment.incremental.IncrementalIndexSchema;
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -45,27 +65,30 @@ import org.junit.runners.Parameterized;
 
 import java.io.IOException;
 import java.util.Arrays;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  */
 @RunWith(Parameterized.class)
 public class SearchQueryRunnerTest
 {
-  @Parameterized.Parameters
+  private static final Logger LOG = new Logger(SearchQueryRunnerTest.class);
+  private static final SearchQueryConfig config = new SearchQueryConfig();
+  private static final SearchQueryQueryToolChest toolChest = new SearchQueryQueryToolChest(
+      config,
+      QueryRunnerTestHelper.NoopIntervalChunkingQueryRunnerDecorator()
+  );
+  private static final SearchStrategySelector selector = new SearchStrategySelector(Suppliers.ofInstance(config));
+
+  @Parameterized.Parameters(name = "{0}")
   public static Iterable<Object[]> constructorFeeder() throws IOException
   {
     return QueryRunnerTestHelper.transformToConstructionFeeder(
         QueryRunnerTestHelper.makeQueryRunners(
             new SearchQueryRunnerFactory(
-                new SearchQueryQueryToolChest(
-                    new SearchQueryConfig(),
-                    QueryRunnerTestHelper.NoopIntervalChunkingQueryRunnerDecorator()
-                ),
+                selector,
+                toolChest,
                 QueryRunnerTestHelper.NOOP_QUERYWATCHER
             )
         )
@@ -73,12 +96,32 @@ public class SearchQueryRunnerTest
   }
 
   private final QueryRunner runner;
+  private final QueryRunner decoratedRunner;
 
   public SearchQueryRunnerTest(
       QueryRunner runner
   )
   {
     this.runner = runner;
+    this.decoratedRunner = toolChest.postMergeQueryDecoration(
+        toolChest.mergeResults(toolChest.preMergeQueryDecoration(runner)));
+  }
+
+  @Test
+  public void testSearchHitSerDe() throws Exception
+  {
+    for (SearchHit hit : Arrays.asList(new SearchHit("dim1", "val1"), new SearchHit("dim2", "val2", 3))) {
+      SearchHit read = TestHelper.getJsonMapper().readValue(
+          TestHelper.getJsonMapper().writeValueAsString(hit),
+          SearchHit.class
+      );
+      Assert.assertEquals(hit, read);
+      if (hit.getCount() == null) {
+        Assert.assertNull(read.getCount());
+      } else {
+        Assert.assertEquals(hit.getCount(), read.getCount());
+      }
+    }
   }
 
   @Test
@@ -91,15 +134,60 @@ public class SearchQueryRunnerTest
                                     .query("a")
                                     .build();
 
-    Map<String, Set<String>> expectedResults = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
-    expectedResults.put(
-        QueryRunnerTestHelper.qualityDimension,
-        Sets.newHashSet("automotive", "mezzanine", "travel", "health", "entertainment")
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "automotive", 93));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "mezzanine", 279));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "travel", 93));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "health", 93));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "entertainment", 93));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.marketDimension, "total_market", 186));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.placementishDimension, "a", 93));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.partialNullDimension, "value", 186));
+
+    checkSearchQuery(searchQuery, expectedHits);
+  }
+
+  @Test
+  public void testSearchWithCardinality()
+  {
+    final SearchQuery searchQuery = Druids.newSearchQueryBuilder()
+                                          .dataSource(QueryRunnerTestHelper.dataSource)
+                                          .granularity(QueryRunnerTestHelper.allGran)
+                                          .intervals(QueryRunnerTestHelper.fullOnInterval)
+                                          .query("a")
+                                          .build();
+
+    // double the value
+    QueryRunner mergedRunner = toolChest.mergeResults(
+        new QueryRunner<Result<SearchResultValue>>()
+        {
+          @Override
+          public Sequence<Result<SearchResultValue>> run(
+              QueryPlus<Result<SearchResultValue>> queryPlus, Map<String, Object> responseContext
+          )
+          {
+            final QueryPlus<Result<SearchResultValue>> queryPlus1 = queryPlus.withQuerySegmentSpec(
+                new MultipleIntervalSegmentSpec(Lists.newArrayList(Intervals.of("2011-01-12/2011-02-28")))
+            );
+            final QueryPlus<Result<SearchResultValue>> queryPlus2 = queryPlus.withQuerySegmentSpec(
+                new MultipleIntervalSegmentSpec(Lists.newArrayList(Intervals.of("2011-03-01/2011-04-15")))
+            );
+            return Sequences.concat(runner.run(queryPlus1, responseContext), runner.run(queryPlus2, responseContext));
+          }
+        }
     );
-    expectedResults.put(QueryRunnerTestHelper.marketDimension, Sets.newHashSet("total_market"));
-    expectedResults.put(QueryRunnerTestHelper.placementishDimension, Sets.newHashSet("a"));
-    expectedResults.put("partial_null_column", Sets.newHashSet("value"));
-    checkSearchQuery(searchQuery, expectedResults);
+
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "automotive", 91));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "mezzanine", 273));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "travel", 91));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "health", 91));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "entertainment", 91));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.marketDimension, "total_market", 182));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.placementishDimension, "a", 91));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.partialNullDimension, "value", 182));
+
+    checkSearchQuery(searchQuery, mergedRunner, expectedHits);
   }
 
   @Test
@@ -118,11 +206,37 @@ public class SearchQueryRunnerTest
                                     .query("e")
                                     .build();
 
-    Map<String, Set<String>> expectedResults = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
-    expectedResults.put(QueryRunnerTestHelper.placementDimension, Sets.newHashSet("preferred"));
-    expectedResults.put(QueryRunnerTestHelper.placementishDimension, Sets.newHashSet("e", "preferred"));
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.placementDimension, "preferred", 1209));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.placementishDimension, "e", 93));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.placementishDimension, "preferred", 1209));
 
-    checkSearchQuery(searchQuery, expectedResults);
+    checkSearchQuery(searchQuery, expectedHits);
+  }
+
+  @Test
+  public void testSearchSameValueInMultiDims2()
+  {
+    SearchQuery searchQuery = Druids.newSearchQueryBuilder()
+                                    .dataSource(QueryRunnerTestHelper.dataSource)
+                                    .granularity(QueryRunnerTestHelper.allGran)
+                                    .intervals(QueryRunnerTestHelper.fullOnInterval)
+                                    .dimensions(
+                                        Arrays.asList(
+                                            QueryRunnerTestHelper.placementDimension,
+                                            QueryRunnerTestHelper.placementishDimension
+                                        )
+                                    )
+                                    .sortSpec(new SearchSortSpec(StringComparators.STRLEN))
+                                    .query("e")
+                                    .build();
+
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.placementishDimension, "e", 93));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.placementDimension, "preferred", 1209));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.placementishDimension, "preferred", 1209));
+
+    checkSearchQuery(searchQuery, expectedHits);
   }
 
   @Test
@@ -135,23 +249,21 @@ public class SearchQueryRunnerTest
                                     .query(new FragmentSearchQuerySpec(Arrays.asList("auto", "ve")))
                                     .build();
 
-    Map<String, Set<String>> expectedResults = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
-    expectedResults.put(QueryRunnerTestHelper.qualityDimension, Sets.newHashSet("automotive"));
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "automotive", 93));
 
-    checkSearchQuery(searchQuery, expectedResults);
+    checkSearchQuery(searchQuery, expectedHits);
   }
 
   @Test
   public void testSearchWithDimensionQuality()
   {
-    Map<String, Set<String>> expectedResults = new HashMap<String, Set<String>>();
-    expectedResults.put(
-        QueryRunnerTestHelper.qualityDimension, new HashSet<String>(
-            Arrays.asList(
-                "automotive", "mezzanine", "travel", "health", "entertainment"
-            )
-        )
-    );
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "automotive", 93));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "mezzanine", 279));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "travel", 93));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "health", 93));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "entertainment", 93));
 
     checkSearchQuery(
         Druids.newSearchQueryBuilder()
@@ -161,15 +273,15 @@ public class SearchQueryRunnerTest
               .intervals(QueryRunnerTestHelper.fullOnInterval)
               .query("a")
               .build(),
-        expectedResults
+        expectedHits
     );
   }
 
   @Test
   public void testSearchWithDimensionProvider()
   {
-    Map<String, Set<String>> expectedResults = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
-    expectedResults.put(QueryRunnerTestHelper.marketDimension, new HashSet<String>(Arrays.asList("total_market")));
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.marketDimension, "total_market", 186));
 
     checkSearchQuery(
         Druids.newSearchQueryBuilder()
@@ -179,28 +291,20 @@ public class SearchQueryRunnerTest
               .intervals(QueryRunnerTestHelper.fullOnInterval)
               .query("a")
               .build(),
-        expectedResults
+        expectedHits
     );
   }
 
   @Test
   public void testSearchWithDimensionsQualityAndProvider()
   {
-    Map<String, Set<String>> expectedResults = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
-    expectedResults.putAll(
-        ImmutableMap.<String, Set<String>>of(
-            QueryRunnerTestHelper.qualityDimension,
-            new HashSet<String>(
-                Arrays.asList(
-                    "automotive", "mezzanine", "travel", "health", "entertainment"
-                )
-            ),
-            QueryRunnerTestHelper.marketDimension,
-            new HashSet<String>(
-                Arrays.asList("total_market")
-            )
-        )
-    );
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "automotive", 93));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "mezzanine", 279));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "travel", 93));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "health", 93));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "entertainment", 93));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.marketDimension, "total_market", 186));
 
     checkSearchQuery(
         Druids.newSearchQueryBuilder()
@@ -215,15 +319,15 @@ public class SearchQueryRunnerTest
               .intervals(QueryRunnerTestHelper.fullOnInterval)
               .query("a")
               .build(),
-        expectedResults
+        expectedHits
     );
   }
 
   @Test
   public void testSearchWithDimensionsPlacementAndProvider()
   {
-    Map<String, Set<String>> expectedResults = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
-    expectedResults.put(QueryRunnerTestHelper.marketDimension, new HashSet<String>(Arrays.asList("total_market")));
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.marketDimension, "total_market", 186));
 
     checkSearchQuery(
         Druids.newSearchQueryBuilder()
@@ -238,7 +342,7 @@ public class SearchQueryRunnerTest
               .intervals(QueryRunnerTestHelper.fullOnInterval)
               .query("mark")
               .build(),
-        expectedResults
+        expectedHits
     );
   }
 
@@ -247,66 +351,71 @@ public class SearchQueryRunnerTest
   public void testSearchWithExtractionFilter1()
   {
     final String automotiveSnowman = "automotive☃";
-    Map<String, Set<String>> expectedResults = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
-    expectedResults.put(
-        QueryRunnerTestHelper.qualityDimension, new HashSet<String>(Arrays.asList(automotiveSnowman))
-    );
-
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, automotiveSnowman, 93));
 
     final LookupExtractionFn lookupExtractionFn = new LookupExtractionFn(
-      new MapLookupExtractor(ImmutableMap.of("automotive", automotiveSnowman), false),
-      true,
-      null,
-      true,
-      false
+        new MapLookupExtractor(ImmutableMap.of("automotive", automotiveSnowman), false),
+        true,
+        null,
+        true,
+        true
     );
 
-    checkSearchQuery(
-        Druids.newSearchQueryBuilder()
-              .dataSource(QueryRunnerTestHelper.dataSource)
-              .granularity(QueryRunnerTestHelper.allGran)
-              .filters(new ExtractionDimFilter(QueryRunnerTestHelper.qualityDimension, automotiveSnowman, lookupExtractionFn, null))
-              .intervals(QueryRunnerTestHelper.fullOnInterval)
-              .dimensions(
-                  new ExtractionDimensionSpec(
-                      QueryRunnerTestHelper.qualityDimension,
-                      null,
-                      lookupExtractionFn,
-                      null
-                  )
-              )
-              .query("☃")
-              .build(),
-        expectedResults
-    );
+    SearchQuery query = Druids.newSearchQueryBuilder()
+                              .dataSource(QueryRunnerTestHelper.dataSource)
+                              .granularity(QueryRunnerTestHelper.allGran)
+                              .filters(
+                                  new ExtractionDimFilter(
+                                      QueryRunnerTestHelper.qualityDimension,
+                                      automotiveSnowman,
+                                      lookupExtractionFn,
+                                      null
+                                  )
+                              )
+                              .intervals(QueryRunnerTestHelper.fullOnInterval)
+                              .dimensions(
+                                  new ExtractionDimensionSpec(
+                                      QueryRunnerTestHelper.qualityDimension,
+                                      null,
+                                      lookupExtractionFn
+                                  )
+                              )
+                              .query("☃")
+                              .build();
+
+    checkSearchQuery(query, expectedHits);
   }
 
   @Test
   public void testSearchWithSingleFilter1()
   {
-    Map<String, Set<String>> expectedResults = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
-    expectedResults.put(
-        QueryRunnerTestHelper.qualityDimension, new HashSet<String>(Arrays.asList("automotive"))
-    );
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "mezzanine", 93));
 
     checkSearchQuery(
         Druids.newSearchQueryBuilder()
               .dataSource(QueryRunnerTestHelper.dataSource)
               .granularity(QueryRunnerTestHelper.allGran)
-              .filters(QueryRunnerTestHelper.qualityDimension, "automotive")
+              .filters(
+                  new AndDimFilter(
+                      Arrays.<DimFilter>asList(
+                          new SelectorDimFilter(QueryRunnerTestHelper.marketDimension, "total_market", null),
+                          new SelectorDimFilter(QueryRunnerTestHelper.qualityDimension, "mezzanine", null)
+                      )))
               .intervals(QueryRunnerTestHelper.fullOnInterval)
               .dimensions(QueryRunnerTestHelper.qualityDimension)
               .query("a")
               .build(),
-        expectedResults
+        expectedHits
     );
   }
 
   @Test
   public void testSearchWithSingleFilter2()
   {
-    Map<String, Set<String>> expectedResults = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
-    expectedResults.put(QueryRunnerTestHelper.marketDimension, new HashSet<String>(Arrays.asList("total_market")));
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.marketDimension, "total_market", 186));
 
     checkSearchQuery(
         Druids.newSearchQueryBuilder()
@@ -317,30 +426,20 @@ public class SearchQueryRunnerTest
               .dimensions(QueryRunnerTestHelper.marketDimension)
               .query("a")
               .build(),
-        expectedResults
+        expectedHits
     );
   }
 
   @Test
   public void testSearchMultiAndFilter()
   {
-    Map<String, Set<String>> expectedResults = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
-    expectedResults.put(QueryRunnerTestHelper.qualityDimension, new HashSet<String>(Arrays.asList("automotive")));
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "automotive", 93));
 
-    DimFilter filter = Druids.newAndDimFilterBuilder()
-                             .fields(
-                                 Arrays.<DimFilter>asList(
-                                     Druids.newSelectorDimFilterBuilder()
-                                           .dimension(QueryRunnerTestHelper.marketDimension)
-                                           .value("spot")
-                                           .build(),
-                                     Druids.newSelectorDimFilterBuilder()
-                                           .dimension(QueryRunnerTestHelper.qualityDimension)
-                                           .value("automotive")
-                                           .build()
-                                 )
-                             )
-                             .build();
+    DimFilter filter = new AndDimFilter(
+        new SelectorDimFilter(QueryRunnerTestHelper.marketDimension, "spot", null),
+        new SelectorDimFilter(QueryRunnerTestHelper.qualityDimension, "automotive", null)
+    );
 
     checkSearchQuery(
         Druids.newSearchQueryBuilder()
@@ -351,30 +450,20 @@ public class SearchQueryRunnerTest
               .intervals(QueryRunnerTestHelper.fullOnInterval)
               .query("a")
               .build(),
-        expectedResults
+        expectedHits
     );
   }
 
   @Test
   public void testSearchWithMultiOrFilter()
   {
-    Map<String, Set<String>> expectedResults = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
-    expectedResults.put(QueryRunnerTestHelper.qualityDimension, new HashSet<String>(Arrays.asList("automotive")));
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "automotive", 93));
 
-    DimFilter filter = Druids.newOrDimFilterBuilder()
-                             .fields(
-                                 Arrays.<DimFilter>asList(
-                                     Druids.newSelectorDimFilterBuilder()
-                                           .dimension(QueryRunnerTestHelper.qualityDimension)
-                                           .value("total_market")
-                                           .build(),
-                                     Druids.newSelectorDimFilterBuilder()
-                                           .dimension(QueryRunnerTestHelper.qualityDimension)
-                                           .value("automotive")
-                                           .build()
-                                 )
-                             )
-                             .build();
+    DimFilter filter = new OrDimFilter(
+        new SelectorDimFilter(QueryRunnerTestHelper.qualityDimension, "total_market", null),
+        new SelectorDimFilter(QueryRunnerTestHelper.qualityDimension, "automotive", null)
+    );
 
     checkSearchQuery(
         Druids.newSearchQueryBuilder()
@@ -385,14 +474,14 @@ public class SearchQueryRunnerTest
               .intervals(QueryRunnerTestHelper.fullOnInterval)
               .query("a")
               .build(),
-        expectedResults
+        expectedHits
     );
   }
 
   @Test
   public void testSearchWithEmptyResults()
   {
-    Map<String, Set<String>> expectedResults = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
+    List<SearchHit> expectedHits = Lists.newLinkedList();
 
     checkSearchQuery(
         Druids.newSearchQueryBuilder()
@@ -401,29 +490,19 @@ public class SearchQueryRunnerTest
               .intervals(QueryRunnerTestHelper.fullOnInterval)
               .query("abcd123")
               .build(),
-        expectedResults
+        expectedHits
     );
   }
 
   @Test
   public void testSearchWithFilterEmptyResults()
   {
-    Map<String, Set<String>> expectedResults = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
+    List<SearchHit> expectedHits = Lists.newLinkedList();
 
-    DimFilter filter = Druids.newAndDimFilterBuilder()
-                             .fields(
-                                 Arrays.<DimFilter>asList(
-                                     Druids.newSelectorDimFilterBuilder()
-                                           .dimension(QueryRunnerTestHelper.marketDimension)
-                                           .value("total_market")
-                                           .build(),
-                                     Druids.newSelectorDimFilterBuilder()
-                                           .dimension(QueryRunnerTestHelper.qualityDimension)
-                                           .value("automotive")
-                                           .build()
-                                 )
-                             )
-                             .build();
+    DimFilter filter = new AndDimFilter(
+        new SelectorDimFilter(QueryRunnerTestHelper.marketDimension, "total_market", null),
+        new SelectorDimFilter(QueryRunnerTestHelper.qualityDimension, "automotive", null)
+    );
 
     checkSearchQuery(
         Druids.newSearchQueryBuilder()
@@ -433,7 +512,7 @@ public class SearchQueryRunnerTest
               .intervals(QueryRunnerTestHelper.fullOnInterval)
               .query("a")
               .build(),
-        expectedResults
+        expectedHits
     );
   }
 
@@ -441,7 +520,7 @@ public class SearchQueryRunnerTest
   @Test
   public void testSearchNonExistingDimension()
   {
-    Map<String, Set<String>> expectedResults = Maps.newTreeMap(String.CASE_INSENSITIVE_ORDER);
+    List<SearchHit> expectedHits = Lists.newLinkedList();
 
     checkSearchQuery(
         Druids.newSearchQueryBuilder()
@@ -451,45 +530,303 @@ public class SearchQueryRunnerTest
               .dimensions("does_not_exist")
               .query("a")
               .build(),
-        expectedResults
+        expectedHits
     );
   }
 
-  private void checkSearchQuery(SearchQuery searchQuery, Map<String, Set<String>> expectedResults)
+  @Test
+  public void testSearchAll()
   {
-    HashMap<String,List> context = new HashMap<String, List>();
-    Iterable<Result<SearchResultValue>> results = Sequences.toList(
-        runner.run(searchQuery, context),
-        Lists.<Result<SearchResultValue>>newArrayList()
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.marketDimension, "spot", 837));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.marketDimension, "total_market", 186));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.marketDimension, "upfront", 186));
+
+    checkSearchQuery(
+        Druids.newSearchQueryBuilder()
+              .dataSource(QueryRunnerTestHelper.dataSource)
+              .granularity(QueryRunnerTestHelper.allGran)
+              .intervals(QueryRunnerTestHelper.fullOnInterval)
+              .dimensions(QueryRunnerTestHelper.marketDimension)
+              .query("")
+              .build(),
+        expectedHits
+    );
+    checkSearchQuery(
+        Druids.newSearchQueryBuilder()
+              .dataSource(QueryRunnerTestHelper.dataSource)
+              .granularity(QueryRunnerTestHelper.allGran)
+              .intervals(QueryRunnerTestHelper.fullOnInterval)
+              .dimensions(QueryRunnerTestHelper.marketDimension)
+              .build(),
+        expectedHits
+    );
+  }
+
+  @Test
+  public void testSearchWithNumericSort()
+  {
+    SearchQuery searchQuery = Druids.newSearchQueryBuilder()
+                                    .dataSource(QueryRunnerTestHelper.dataSource)
+                                    .granularity(QueryRunnerTestHelper.allGran)
+                                    .intervals(QueryRunnerTestHelper.fullOnInterval)
+                                    .query("a")
+                                    .sortSpec(new SearchSortSpec(StringComparators.NUMERIC))
+                                    .build();
+
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.placementishDimension, "a", 93));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "automotive", 93));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "entertainment", 93));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "health", 93));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "mezzanine", 279));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.marketDimension, "total_market", 186));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.qualityDimension, "travel", 93));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.partialNullDimension, "value", 186));
+
+    checkSearchQuery(searchQuery, expectedHits);
+  }
+
+  @Test
+  public void testSearchOnTime()
+  {
+    SearchQuery searchQuery = Druids.newSearchQueryBuilder()
+                                    .dataSource(QueryRunnerTestHelper.dataSource)
+                                    .granularity(QueryRunnerTestHelper.allGran)
+                                    .intervals(QueryRunnerTestHelper.fullOnInterval)
+                                    .query("Friday")
+                                    .dimensions(new ExtractionDimensionSpec(
+                                        Column.TIME_COLUMN_NAME,
+                                        "__time2",
+                                        new TimeFormatExtractionFn(
+                                            "EEEE",
+                                            null,
+                                            null,
+                                            null,
+                                            false
+                                        )
+                                    ))
+                                    .build();
+
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit("__time2", "Friday", 169));
+
+    checkSearchQuery(searchQuery, expectedHits);
+  }
+
+  @Test
+  public void testSearchOnLongColumn()
+  {
+    SearchQuery searchQuery = Druids.newSearchQueryBuilder()
+                                    .dimensions(
+                                        new DefaultDimensionSpec(
+                                            Column.TIME_COLUMN_NAME, Column.TIME_COLUMN_NAME,
+                                            ValueType.LONG
+                                        )
+                                    )
+                                    .dataSource(QueryRunnerTestHelper.dataSource)
+                                    .granularity(QueryRunnerTestHelper.allGran)
+                                    .intervals(QueryRunnerTestHelper.fullOnInterval)
+                                    .query("1297123200000")
+                                    .build();
+
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(Column.TIME_COLUMN_NAME, "1297123200000", 13));
+    checkSearchQuery(searchQuery, expectedHits);
+  }
+
+  @Test
+  public void testSearchOnLongColumnWithExFn()
+  {
+    String jsFn = "function(str) { return 'super-' + str; }";
+    ExtractionFn jsExtractionFn = new JavaScriptExtractionFn(jsFn, false, JavaScriptConfig.getEnabledInstance());
+
+    SearchQuery searchQuery = Druids.newSearchQueryBuilder()
+                                    .dimensions(
+                                        new ExtractionDimensionSpec(
+                                            Column.TIME_COLUMN_NAME, Column.TIME_COLUMN_NAME,
+                                            jsExtractionFn
+                                        )
+                                    )
+                                    .dataSource(QueryRunnerTestHelper.dataSource)
+                                    .granularity(QueryRunnerTestHelper.allGran)
+                                    .intervals(QueryRunnerTestHelper.fullOnInterval)
+                                    .query("1297123200000")
+                                    .build();
+
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(Column.TIME_COLUMN_NAME, "super-1297123200000", 13));
+    checkSearchQuery(searchQuery, expectedHits);
+  }
+
+  @Test
+  public void testSearchOnFloatColumn()
+  {
+    SearchQuery searchQuery = Druids.newSearchQueryBuilder()
+                                    .dimensions(
+                                        new DefaultDimensionSpec(
+                                            QueryRunnerTestHelper.indexMetric, QueryRunnerTestHelper.indexMetric,
+                                            ValueType.DOUBLE
+                                        )
+                                    )
+                                    .dataSource(QueryRunnerTestHelper.dataSource)
+                                    .granularity(QueryRunnerTestHelper.allGran)
+                                    .intervals(QueryRunnerTestHelper.fullOnInterval)
+                                    .query("100.7")
+                                    .build();
+
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.indexMetric, "100.706057", 1));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.indexMetric, "100.775597", 1));
+    checkSearchQuery(searchQuery, expectedHits);
+  }
+
+  @Test
+  public void testSearchOnFloatColumnWithExFn()
+  {
+    String jsFn = "function(str) { return 'super-' + str; }";
+    ExtractionFn jsExtractionFn = new JavaScriptExtractionFn(jsFn, false, JavaScriptConfig.getEnabledInstance());
+
+    SearchQuery searchQuery = Druids.newSearchQueryBuilder()
+                                    .dimensions(
+                                        new ExtractionDimensionSpec(
+                                            QueryRunnerTestHelper.indexMetric, QueryRunnerTestHelper.indexMetric,
+                                            jsExtractionFn
+                                        )
+                                    )
+                                    .dataSource(QueryRunnerTestHelper.dataSource)
+                                    .granularity(QueryRunnerTestHelper.allGran)
+                                    .intervals(QueryRunnerTestHelper.fullOnInterval)
+                                    .query("100.7")
+                                    .build();
+
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.indexMetric, "super-100.706057", 1));
+    expectedHits.add(new SearchHit(QueryRunnerTestHelper.indexMetric, "super-100.775597", 1));
+    checkSearchQuery(searchQuery, expectedHits);
+  }
+
+  @Test
+  public void testSearchWithNullValueInDimension() throws Exception
+  {
+    IncrementalIndex<Aggregator> index = new IncrementalIndex.Builder()
+        .setIndexSchema(
+            new IncrementalIndexSchema.Builder()
+                .withMinTimestamp(DateTimes.of("2011-01-12T00:00:00.000Z").getMillis())
+                .build()
+        )
+        .setMaxRowCount(10)
+        .buildOnheap();
+
+    index.add(
+        new MapBasedInputRow(
+            1481871600000L,
+            Arrays.asList("name", "host"),
+            ImmutableMap.<String, Object>of("name", "name1", "host", "host")
+        )
+    );
+    index.add(
+        new MapBasedInputRow(
+            1481871670000L,
+            Arrays.asList("name", "table"),
+            ImmutableMap.<String, Object>of("name", "name2", "table", "table")
+        )
     );
 
+    SearchQuery searchQuery = Druids.newSearchQueryBuilder()
+                                    .dimensions(
+                                        new DefaultDimensionSpec("table", "table")
+                                    )
+                                    .dataSource(QueryRunnerTestHelper.dataSource)
+                                    .granularity(QueryRunnerTestHelper.allGran)
+                                    .intervals(QueryRunnerTestHelper.fullOnInterval)
+                                    // simulate when cardinality is big enough to fallback to cursorOnly strategy
+                                    .context(ImmutableMap.<String, Object>of("searchStrategy", "cursorOnly"))
+                                    .build();
+
+    QueryRunnerFactory factory = new SearchQueryRunnerFactory(
+        selector,
+        toolChest,
+        QueryRunnerTestHelper.NOOP_QUERYWATCHER
+    );
+    QueryRunner runner = factory.createRunner(new QueryableIndexSegment("asdf", TestIndex.persistRealtimeAndLoadMMapped(index)));
+    List<SearchHit> expectedHits = Lists.newLinkedList();
+    expectedHits.add(new SearchHit("table", "table", 1));
+    expectedHits.add(new SearchHit("table", "", 1));
+    checkSearchQuery(searchQuery, runner, expectedHits);
+  }
+
+  @Test
+  public void testSearchWithNotExistedDimension() throws Exception
+  {
+    SearchQuery searchQuery = Druids.newSearchQueryBuilder()
+                                    .dimensions(
+                                        new DefaultDimensionSpec("asdf", "asdf")
+                                    )
+                                    .dataSource(QueryRunnerTestHelper.dataSource)
+                                    .granularity(QueryRunnerTestHelper.allGran)
+                                    .intervals(QueryRunnerTestHelper.fullOnInterval)
+                                    .build();
+
+    List<SearchHit> noHit = Lists.newLinkedList();
+    checkSearchQuery(searchQuery, noHit);
+  }
+
+  private void checkSearchQuery(Query searchQuery, List<SearchHit> expectedResults)
+  {
+    checkSearchQuery(searchQuery, runner, expectedResults);
+    checkSearchQuery(searchQuery, decoratedRunner, expectedResults);
+  }
+
+  private void checkSearchQuery(Query searchQuery, QueryRunner runner, List<SearchHit> expectedResults)
+  {
+    Iterable<Result<SearchResultValue>> results = Sequences.toList(
+        runner.run(QueryPlus.wrap(searchQuery), ImmutableMap.of()),
+        Lists.<Result<SearchResultValue>>newArrayList()
+    );
+    List<SearchHit> copy = Lists.newLinkedList(expectedResults);
     for (Result<SearchResultValue> result : results) {
-      Assert.assertEquals(new DateTime("2011-01-12T00:00:00.000Z"), result.getTimestamp());
+      Assert.assertEquals(DateTimes.of("2011-01-12T00:00:00.000Z"), result.getTimestamp());
       Assert.assertTrue(result.getValue() instanceof Iterable);
 
       Iterable<SearchHit> resultValues = result.getValue();
       for (SearchHit resultValue : resultValues) {
-        String dimension = resultValue.getDimension();
-        String theValue = resultValue.getValue();
-        Assert.assertTrue(
-            String.format("Result had unknown dimension[%s]", dimension),
-            expectedResults.containsKey(dimension)
-        );
-
-        Set<String> expectedSet = expectedResults.get(dimension);
-        Assert.assertTrue(
-            String.format("Couldn't remove dim[%s], value[%s]", dimension, theValue), expectedSet.remove(theValue)
-        );
+        int index = copy.indexOf(resultValue);
+        if (index < 0) {
+          fail(
+              expectedResults, results,
+              "No result found containing " + resultValue.getDimension() + " and " + resultValue.getValue()
+          );
+        }
+        SearchHit expected = copy.remove(index);
+        if (!resultValue.toString().equals(expected.toString())) {
+          fail(
+              expectedResults, results,
+              "Invalid count for " + resultValue + ".. which was expected to be " + expected.getCount()
+          );
+        }
       }
     }
-
-    for (Map.Entry<String, Set<String>> entry : expectedResults.entrySet()) {
-      Assert.assertTrue(
-          String.format(
-              "Dimension[%s] should have had everything removed, still has[%s]", entry.getKey(), entry.getValue()
-          ),
-          entry.getValue().isEmpty()
-      );
+    if (!copy.isEmpty()) {
+      fail(expectedResults, results, "Some expected results are not shown: " + copy);
     }
+  }
+
+  private void fail(
+      List<SearchHit> expectedResults,
+      Iterable<Result<SearchResultValue>> results, String errorMsg
+  )
+  {
+    LOG.info("Expected..");
+    for (SearchHit expected : expectedResults) {
+      LOG.info(expected.toString());
+    }
+    LOG.info("Result..");
+    for (Result<SearchResultValue> r : results) {
+      for (SearchHit v : r.getValue()) {
+        LOG.info(v.toString());
+      }
+    }
+    Assert.fail(errorMsg);
   }
 }

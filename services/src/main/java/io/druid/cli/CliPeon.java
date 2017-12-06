@@ -19,16 +19,18 @@
 
 package io.druid.cli;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Binder;
+import com.google.inject.Inject;
 import com.google.inject.Injector;
 import com.google.inject.Key;
 import com.google.inject.Module;
+import com.google.inject.Provides;
 import com.google.inject.multibindings.MapBinder;
+import com.google.inject.name.Named;
 import com.google.inject.name.Names;
-import com.metamx.common.lifecycle.Lifecycle;
-import com.metamx.common.logger.Logger;
 import io.airlift.airline.Arguments;
 import io.airlift.airline.Command;
 import io.airlift.airline.Option;
@@ -36,6 +38,7 @@ import io.druid.client.cache.CacheConfig;
 import io.druid.client.coordinator.CoordinatorClient;
 import io.druid.guice.Binders;
 import io.druid.guice.CacheModule;
+import io.druid.guice.DruidProcessingModule;
 import io.druid.guice.IndexingServiceFirehoseModule;
 import io.druid.guice.Jerseys;
 import io.druid.guice.JsonConfigProvider;
@@ -44,6 +47,11 @@ import io.druid.guice.LifecycleModule;
 import io.druid.guice.ManageLifecycle;
 import io.druid.guice.NodeTypeConfig;
 import io.druid.guice.PolyBind;
+import io.druid.guice.QueryRunnerFactoryModule;
+import io.druid.guice.QueryableModule;
+import io.druid.guice.QueryablePeonModule;
+import io.druid.guice.annotations.Json;
+import io.druid.guice.annotations.Smile;
 import io.druid.indexing.common.RetryPolicyConfig;
 import io.druid.indexing.common.RetryPolicyFactory;
 import io.druid.indexing.common.TaskToolboxFactory;
@@ -53,6 +61,7 @@ import io.druid.indexing.common.actions.TaskActionClientFactory;
 import io.druid.indexing.common.actions.TaskActionToolbox;
 import io.druid.indexing.common.config.TaskConfig;
 import io.druid.indexing.common.config.TaskStorageConfig;
+import io.druid.indexing.common.task.Task;
 import io.druid.indexing.overlord.HeapMemoryTaskStorage;
 import io.druid.indexing.overlord.IndexerMetadataStorageCoordinator;
 import io.druid.indexing.overlord.TaskRunner;
@@ -60,9 +69,11 @@ import io.druid.indexing.overlord.TaskStorage;
 import io.druid.indexing.overlord.ThreadPoolTaskRunner;
 import io.druid.indexing.worker.executor.ExecutorLifecycle;
 import io.druid.indexing.worker.executor.ExecutorLifecycleConfig;
+import io.druid.java.util.common.lifecycle.Lifecycle;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.metadata.IndexerSQLMetadataStorageCoordinator;
 import io.druid.query.QuerySegmentWalker;
-import io.druid.query.extraction.LookupReferencesManager;
+import io.druid.query.lookup.LookupModule;
 import io.druid.segment.loading.DataSegmentArchiver;
 import io.druid.segment.loading.DataSegmentKiller;
 import io.druid.segment.loading.DataSegmentMover;
@@ -72,20 +83,25 @@ import io.druid.segment.loading.OmniDataSegmentMover;
 import io.druid.segment.loading.SegmentLoaderConfig;
 import io.druid.segment.loading.StorageLocationConfig;
 import io.druid.segment.realtime.firehose.ChatHandlerProvider;
-import io.druid.segment.realtime.firehose.ChatHandlerResource;
 import io.druid.segment.realtime.firehose.NoopChatHandlerProvider;
 import io.druid.segment.realtime.firehose.ServiceAnnouncingChatHandlerProvider;
 import io.druid.segment.realtime.plumber.CoordinatorBasedSegmentHandoffNotifierConfig;
 import io.druid.segment.realtime.plumber.CoordinatorBasedSegmentHandoffNotifierFactory;
 import io.druid.segment.realtime.plumber.SegmentHandoffNotifierFactory;
-import io.druid.server.QueryResource;
+import io.druid.server.coordination.BatchDataSegmentAnnouncer;
+import io.druid.server.coordination.ServerType;
+import io.druid.server.http.SegmentListerResource;
 import io.druid.server.initialization.jetty.ChatHandlerServerModule;
 import io.druid.server.initialization.jetty.JettyServerInitializer;
+import io.druid.server.metrics.DataSourceTaskIdHolder;
 import org.eclipse.jetty.server.Server;
 
+import javax.annotation.Nullable;
 import java.io.File;
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Properties;
 import java.util.Set;
 
 /**
@@ -93,7 +109,7 @@ import java.util.Set;
 @Command(
     name = "peon",
     description = "Runs a Peon, this is an individual forked \"task\" used as part of the indexing service. "
-                  + "This should rarely, if ever, be used directly."
+                  + "This should rarely, if ever, be used directly. See http://druid.io/docs/latest/design/peons.html for a description"
 )
 public class CliPeon extends GuiceRunnable
 {
@@ -105,6 +121,9 @@ public class CliPeon extends GuiceRunnable
 
   private static final Logger log = new Logger(CliPeon.class);
 
+  @Inject
+  private Properties properties;
+
   public CliPeon()
   {
     super(log);
@@ -114,13 +133,17 @@ public class CliPeon extends GuiceRunnable
   protected List<? extends Module> getModules()
   {
     return ImmutableList.<Module>of(
+        new DruidProcessingModule(),
+        new QueryableModule(),
+        new QueryRunnerFactoryModule(),
         new Module()
         {
           @Override
           public void configure(Binder binder)
           {
             binder.bindConstant().annotatedWith(Names.named("serviceName")).to("druid/peon");
-            binder.bindConstant().annotatedWith(Names.named("servicePort")).to(-1);
+            binder.bindConstant().annotatedWith(Names.named("servicePort")).to(0);
+            binder.bindConstant().annotatedWith(Names.named("tlsServicePort")).to(-1);
 
             PolyBind.createChoice(
                 binder,
@@ -157,6 +180,7 @@ public class CliPeon extends GuiceRunnable
             binder.bind(DataSegmentArchiver.class).to(OmniDataSegmentArchiver.class).in(LazySingleton.class);
 
             binder.bind(ExecutorLifecycle.class).in(ManageLifecycle.class);
+            LifecycleModule.register(binder, ExecutorLifecycle.class);
             binder.bind(ExecutorLifecycleConfig.class).toInstance(
                 new ExecutorLifecycleConfig()
                     .setTaskFile(new File(taskAndStatusFile.get(0)))
@@ -188,12 +212,8 @@ public class CliPeon extends GuiceRunnable
             binder.bind(CoordinatorClient.class).in(LazySingleton.class);
 
             binder.bind(JettyServerInitializer.class).to(QueryJettyServerInitializer.class);
-            Jerseys.addResource(binder, QueryResource.class);
-            Jerseys.addResource(binder, ChatHandlerResource.class);
-            LifecycleModule.register(binder, QueryResource.class);
-            LifecycleModule.register(binder, LookupReferencesManager.class);
-            binder.bind(NodeTypeConfig.class).toInstance(new NodeTypeConfig(nodeType));
-
+            Jerseys.addResource(binder, SegmentListerResource.class);
+            binder.bind(NodeTypeConfig.class).toInstance(new NodeTypeConfig(ServerType.fromString(nodeType)));
             LifecycleModule.register(binder, Server.class);
           }
 
@@ -221,9 +241,54 @@ public class CliPeon extends GuiceRunnable
                             .to(RemoteTaskActionClientFactory.class).in(LazySingleton.class);
 
           }
+
+          @Provides
+          @LazySingleton
+          public Task readTask(@Json ObjectMapper mapper, ExecutorLifecycleConfig config)
+          {
+            try {
+              return mapper.readValue(config.getTaskFile(), Task.class);
+            }
+            catch (IOException e) {
+              throw Throwables.propagate(e);
+            }
+          }
+
+          @Provides
+          @LazySingleton
+          @Named(DataSourceTaskIdHolder.DATA_SOURCE_BINDING)
+          public String getDataSourceFromTask(final Task task)
+          {
+            return task.getDataSource();
+          }
+
+          @Provides
+          @LazySingleton
+          @Named(DataSourceTaskIdHolder.TASK_ID_BINDING)
+          public String getTaskIDFromTask(final Task task)
+          {
+            return task.getId();
+          }
+
+          @Provides
+          public SegmentListerResource getSegmentListerResource(
+              @Json ObjectMapper jsonMapper,
+              @Smile ObjectMapper smileMapper,
+              @Nullable BatchDataSegmentAnnouncer announcer
+          )
+          {
+            return new SegmentListerResource(
+                jsonMapper,
+                smileMapper,
+                announcer,
+                null
+            );
+          }
         },
+        new QueryablePeonModule(),
         new IndexingServiceFirehoseModule(),
-        new ChatHandlerServerModule()
+        new ChatHandlerServerModule(properties),
+        new LookupModule()
     );
   }
 
@@ -258,7 +323,12 @@ public class CliPeon extends GuiceRunnable
 
         // Explicitly call lifecycle stop, dont rely on shutdown hook.
         lifecycle.stop();
-        Runtime.getRuntime().removeShutdownHook(hook);
+        try {
+          Runtime.getRuntime().removeShutdownHook(hook);
+        }
+        catch (IllegalStateException e) {
+          log.warn("Cannot remove shutdown hook, already shutting down");
+        }
       }
       catch (Throwable t) {
         log.error(t, "Error when starting up.  Failing.");

@@ -19,8 +19,10 @@
 
 package io.druid.query.aggregation.hyperloglog;
 
+import io.druid.hll.HyperLogLogCollector;
 import io.druid.query.aggregation.BufferAggregator;
-import io.druid.segment.ObjectColumnSelector;
+import io.druid.query.monomorphicprocessing.RuntimeShapeInspector;
+import io.druid.segment.BaseObjectColumnValueSelector;
 
 import java.nio.ByteBuffer;
 
@@ -29,11 +31,9 @@ import java.nio.ByteBuffer;
 public class HyperUniquesBufferAggregator implements BufferAggregator
 {
   private static final byte[] EMPTY_BYTES = HyperLogLogCollector.makeEmptyVersionedByteArray();
-  private final ObjectColumnSelector selector;
+  private final BaseObjectColumnValueSelector selector;
 
-  public HyperUniquesBufferAggregator(
-      ObjectColumnSelector selector
-  )
+  public HyperUniquesBufferAggregator(BaseObjectColumnValueSelector selector)
   {
     this.selector = selector;
   }
@@ -49,18 +49,25 @@ public class HyperUniquesBufferAggregator implements BufferAggregator
   @Override
   public void aggregate(ByteBuffer buf, int position)
   {
-    HyperLogLogCollector collector = (HyperLogLogCollector) selector.get();
+    HyperLogLogCollector collector = (HyperLogLogCollector) selector.getObject();
 
     if (collector == null) {
       return;
     }
 
-    HyperLogLogCollector.makeCollector(
-        (ByteBuffer) buf.duplicate().position(position).limit(
-            position
-            + HyperLogLogCollector.getLatestNumBytesForDenseStorage()
-        )
-    ).fold(collector);
+    // Save position, limit and restore later instead of allocating a new ByteBuffer object
+    final int oldPosition = buf.position();
+    final int oldLimit = buf.limit();
+    buf.limit(position + HyperLogLogCollector.getLatestNumBytesForDenseStorage());
+    buf.position(position);
+
+    try {
+      HyperLogLogCollector.makeCollector(buf).fold(collector);
+    }
+    finally {
+      buf.limit(oldLimit);
+      buf.position(oldPosition);
+    }
   }
 
   @Override
@@ -90,8 +97,20 @@ public class HyperUniquesBufferAggregator implements BufferAggregator
   }
 
   @Override
+  public double getDouble(ByteBuffer buf, int position)
+  {
+    throw new UnsupportedOperationException("HyperUniquesBufferAggregator does not support getDouble()");
+  }
+
+  @Override
   public void close()
   {
     // no resources to cleanup
+  }
+
+  @Override
+  public void inspectRuntimeShape(RuntimeShapeInspector inspector)
+  {
+    inspector.visit("selector", selector);
   }
 }

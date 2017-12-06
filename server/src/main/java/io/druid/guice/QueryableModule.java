@@ -22,11 +22,14 @@ package io.druid.guice;
 import com.fasterxml.jackson.databind.Module;
 import com.fasterxml.jackson.databind.module.SimpleModule;
 import com.google.inject.Binder;
-import com.google.inject.util.Providers;
 import io.druid.initialization.DruidModule;
-import io.druid.query.QuerySegmentWalker;
+import io.druid.query.DefaultQueryRunnerFactoryConglomerate;
+import io.druid.query.QueryRunnerFactoryConglomerate;
+import io.druid.server.log.ComposingRequestLoggerProvider;
 import io.druid.server.log.EmittingRequestLoggerProvider;
 import io.druid.server.log.FileRequestLoggerProvider;
+import io.druid.server.log.FilteredRequestLoggerProvider;
+import io.druid.server.log.LoggingRequestLoggerProvider;
 import io.druid.server.log.RequestLogger;
 import io.druid.server.log.RequestLoggerProvider;
 
@@ -40,9 +43,12 @@ public class QueryableModule implements DruidModule
   @Override
   public void configure(Binder binder)
   {
-    binder.bind(QuerySegmentWalker.class).toProvider(Providers.<QuerySegmentWalker>of(null));
     binder.bind(RequestLogger.class).toProvider(RequestLoggerProvider.class).in(ManageLifecycle.class);
     JsonConfigProvider.bind(binder, "druid.request.logging", RequestLoggerProvider.class);
+
+    binder.bind(QueryRunnerFactoryConglomerate.class)
+          .to(DefaultQueryRunnerFactoryConglomerate.class)
+          .in(LazySingleton.class);
   }
 
   @Override
@@ -50,7 +56,13 @@ public class QueryableModule implements DruidModule
   {
     return Arrays.<Module>asList(
         new SimpleModule("QueryableModule")
-            .registerSubtypes(EmittingRequestLoggerProvider.class, FileRequestLoggerProvider.class)
+            .registerSubtypes(
+                EmittingRequestLoggerProvider.class,
+                FileRequestLoggerProvider.class,
+                LoggingRequestLoggerProvider.class,
+                ComposingRequestLoggerProvider.class,
+                FilteredRequestLoggerProvider.class
+            )
     );
   }
 }

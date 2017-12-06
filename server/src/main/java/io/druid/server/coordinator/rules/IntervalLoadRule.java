@@ -22,8 +22,9 @@ package io.druid.server.coordinator.rules;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableMap;
-import com.metamx.common.logger.Logger;
+
 import io.druid.client.DruidServer;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.timeline.DataSegment;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
@@ -57,6 +58,7 @@ public class IntervalLoadRule extends LoadRule
     return "loadByInterval";
   }
 
+  @Override
   @JsonProperty
   public Map<String, Integer> getTieredReplicants()
   {
@@ -85,7 +87,7 @@ public class IntervalLoadRule extends LoadRule
   @Override
   public boolean appliesTo(Interval theInterval, DateTime referenceTimestamp)
   {
-    return interval.contains(theInterval);
+    return Rules.eligibleForLoad(interval, theInterval);
   }
 
   @Override

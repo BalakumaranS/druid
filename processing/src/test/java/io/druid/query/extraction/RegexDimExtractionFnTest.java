@@ -88,6 +88,43 @@ public class RegexDimExtractionFnTest
   }
 
   @Test
+  public void testIndexZero()
+  {
+    String regex = "/([^/]{4})/";
+    ExtractionFn extractionFn = new RegexDimExtractionFn(regex, 0, true, null);
+    Set<String> extracted = Sets.newLinkedHashSet();
+
+    for (String path : paths) {
+      extracted.add(extractionFn.apply(path));
+    }
+
+    Set<String> expected = Sets.newLinkedHashSet(
+        ImmutableList.of("/prod/", "/demo/", "/dash/")
+    );
+    Assert.assertEquals(expected, extracted);
+  }
+
+  @Test
+  public void testIndexTwo()
+  {
+    String regex = "^/([^/]+)/([^/]+)";
+    ExtractionFn extractionFn = new RegexDimExtractionFn(regex, 2, true, null);
+    Set<String> extracted = Sets.newLinkedHashSet();
+
+    for (String path : paths) {
+      extracted.add(extractionFn.apply(path));
+    }
+
+    Set<String> expected = Sets.newLinkedHashSet(
+        ImmutableList.of(
+            "prod", "demo",
+            "aloe", "baloo"
+        )
+    );
+    Assert.assertEquals(expected, extracted);
+  }
+
+  @Test
   public void testStringExtraction()
   {
     String regex = "(.)";
@@ -102,7 +139,6 @@ public class RegexDimExtractionFnTest
     Assert.assertEquals(expected, extracted);
   }
 
-
   @Test
   public void testNullAndEmpty()
   {
@@ -114,6 +150,39 @@ public class RegexDimExtractionFnTest
     Assert.assertEquals(null, extractionFn.apply(null));
     // empty match, map empty result to null
     Assert.assertEquals(null, extractionFn.apply("/a/b"));
+  }
+
+  @Test
+  public void testMissingValueReplacementWhenPatternDoesNotMatchNull()
+  {
+    String regex = "(bob)";
+    ExtractionFn extractionFn = new RegexDimExtractionFn(regex, true, "NO MATCH");
+    Assert.assertEquals("NO MATCH", extractionFn.apply(""));
+    Assert.assertEquals("NO MATCH", extractionFn.apply(null));
+    Assert.assertEquals("NO MATCH", extractionFn.apply("abc"));
+    Assert.assertEquals("bob", extractionFn.apply("bob"));
+  }
+
+  @Test
+  public void testMissingValueReplacementWhenPatternMatchesNull()
+  {
+    String regex = "^()$";
+    ExtractionFn extractionFn = new RegexDimExtractionFn(regex, true, "NO MATCH");
+    Assert.assertEquals(null, extractionFn.apply(""));
+    Assert.assertEquals(null, extractionFn.apply(null));
+    Assert.assertEquals("NO MATCH", extractionFn.apply("abc"));
+  }
+
+  @Test
+  public void testMissingValueReplacementToEmpty()
+  {
+    String regex = "(bob)";
+    ExtractionFn extractionFn = new RegexDimExtractionFn(regex, true, "");
+    Assert.assertEquals(null, extractionFn.apply(null));
+    Assert.assertEquals(null, extractionFn.apply(""));
+    Assert.assertEquals(null, extractionFn.apply("abc"));
+    Assert.assertEquals(null, extractionFn.apply("123"));
+    Assert.assertEquals("bob", extractionFn.apply("bobby"));
   }
 
   @Test
@@ -132,8 +201,10 @@ public class RegexDimExtractionFnTest
 
     byte[] cacheKey = extractionFn.getCacheKey();
     byte[] expectedCacheKey = new byte[]{
-        0x01, 0x28, 0x61, 0x5C, 0x77, 0x2A, 0x29, (byte) 0xFF,
-        0x66, 0x6F, 0x6F, 0x62, 0x61, 0x72, (byte) 0xFF, 0x01
+        0x01, 0x28, 0x61, 0x5C, 0x77, 0x2A, 0x29, (byte) 0xFF, // expr
+        0x00, 0x00, 0x00, 0x01, // index
+        0x66, 0x6F, 0x6F, 0x62, 0x61, 0x72, (byte) 0xFF, // replaceMissingValueWith
+        0x01 // replaceMissingValue
     };
     Assert.assertArrayEquals(expectedCacheKey, cacheKey);
 
@@ -149,7 +220,12 @@ public class RegexDimExtractionFnTest
     Assert.assertEquals(expected2, extracted2);
 
     cacheKey = nullExtractionFn.getCacheKey();
-    expectedCacheKey = new byte[]{0x01, 0x28, 0x61, 0x5C, 0x77, 0x2A, 0x29, (byte) 0xFF, (byte) 0xFF, 0x01};
+    expectedCacheKey = new byte[]{
+        0x01, 0x28, 0x61, 0x5C, 0x77, 0x2A, 0x29, (byte) 0xFF, // expr
+        0x00, 0x00, 0x00, 0x01, // index
+        (byte) 0xFF, // replaceMissingValueWith
+        0x01 // replaceMissingValue
+    };
     Assert.assertArrayEquals(expectedCacheKey, cacheKey);
   }
 
@@ -158,12 +234,12 @@ public class RegexDimExtractionFnTest
   {
     final ObjectMapper objectMapper = new DefaultObjectMapper();
     final String json = "{ \"type\" : \"regex\", \"expr\" : \".(...)?\" , " +
-                        "\"replaceMissingValues\": true, \"replaceMissingValuesWith\":\"foobar\"}";
+                        "\"replaceMissingValue\": true, \"replaceMissingValueWith\":\"foobar\"}";
     RegexDimExtractionFn extractionFn = (RegexDimExtractionFn) objectMapper.readValue(json, ExtractionFn.class);
 
     Assert.assertEquals(".(...)?", extractionFn.getExpr());
-    Assert.assertTrue(extractionFn.isReplaceMissingValues());
-    Assert.assertEquals("foobar", extractionFn.getReplaceMissingValuesWith());
+    Assert.assertTrue(extractionFn.isReplaceMissingValue());
+    Assert.assertEquals("foobar", extractionFn.getReplaceMissingValueWith());
 
     // round trip
     Assert.assertEquals(

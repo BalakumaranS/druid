@@ -20,10 +20,10 @@
 package io.druid.indexer.path;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
 import org.junit.Assert;
 import org.junit.Test;
 
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -31,7 +31,8 @@ import java.util.List;
 public class HadoopGlobPathSplitterTest
 {
   @Test
-  public void testGlobSplitting() throws Exception {
+  public void testGlobSplitting() throws Exception
+  {
     String path = "/a/b/c";
     List<String> expected = ImmutableList.of(
         "/a/b/c"
@@ -126,12 +127,8 @@ public class HadoopGlobPathSplitterTest
     Assert.assertEquals(expected, splitGlob(path));
   }
 
-  private static List<String> splitGlob(String path) {
-    List<StringBuilder> tmp = HadoopGlobPathSplitter.splitGlob(path);
-    List<String> result = new ArrayList<>(tmp.size());
-    for(StringBuilder sb : tmp) {
-      result.add(sb.toString());
-    }
-    return result;
+  private static List<String> splitGlob(String path)
+  {
+    return Lists.newArrayList(HadoopGlobPathSplitter.splitGlob(path));
   }
 }

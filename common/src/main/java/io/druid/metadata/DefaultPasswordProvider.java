@@ -46,8 +46,30 @@ public class DefaultPasswordProvider implements PasswordProvider
   }
 
   @Override
-  public String toString() {
+  public String toString()
+  {
     return this.getClass().getCanonicalName();
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (!(o instanceof DefaultPasswordProvider)) {
+      return false;
+    }
+
+    DefaultPasswordProvider that = (DefaultPasswordProvider) o;
+
+    return getPassword() != null ? getPassword().equals(that.getPassword()) : that.getPassword() == null;
+  }
+
+  @Override
+  public int hashCode()
+  {
+    return getPassword() != null ? getPassword().hashCode() : 0;
   }
 }
 

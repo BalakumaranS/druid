@@ -23,7 +23,7 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Function;
 import com.google.common.collect.Iterables;
-import io.druid.common.utils.JodaUtils;
+import io.druid.java.util.common.JodaUtils;
 import io.druid.query.Query;
 import io.druid.query.QueryRunner;
 import io.druid.query.QuerySegmentWalker;
@@ -95,13 +95,21 @@ public class MultipleSpecificSegmentSpec implements QuerySegmentSpec
   @Override
   public boolean equals(Object o)
   {
-    if (this == o) return true;
-    if (o == null || getClass() != o.getClass()) return false;
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
 
     MultipleSpecificSegmentSpec that = (MultipleSpecificSegmentSpec) o;
 
-    if (descriptors != null ? !descriptors.equals(that.descriptors) : that.descriptors != null) return false;
-    if (intervals != null ? !intervals.equals(that.intervals) : that.intervals != null) return false;
+    if (descriptors != null ? !descriptors.equals(that.descriptors) : that.descriptors != null) {
+      return false;
+    }
+    if (intervals != null ? !intervals.equals(that.intervals) : that.intervals != null) {
+      return false;
+    }
 
     return true;
   }

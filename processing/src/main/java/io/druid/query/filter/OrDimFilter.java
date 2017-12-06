@@ -21,13 +21,16 @@ package io.druid.query.filter;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.base.Function;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
-import com.google.common.collect.Lists;
-import io.druid.query.Druids;
+import com.google.common.collect.RangeSet;
+import com.google.common.collect.TreeRangeSet;
+import io.druid.java.util.common.StringUtils;
+import io.druid.segment.filter.Filters;
+import io.druid.segment.filter.OrFilter;
 
-import java.util.Collections;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -43,9 +46,23 @@ public class OrDimFilter implements DimFilter
       @JsonProperty("fields") List<DimFilter> fields
   )
   {
-    fields.removeAll(Collections.singletonList(null));
+    fields = DimFilters.filterNulls(fields);
     Preconditions.checkArgument(fields.size() > 0, "OR operator requires at least one field");
     this.fields = fields;
+  }
+
+  public OrDimFilter(DimFilter... fields)
+  {
+    this(Arrays.asList(fields));
+  }
+
+  public OrDimFilter(String dimensionName, String value, String... values)
+  {
+    fields = new ArrayList<>(values.length + 1);
+    fields.add(new SelectorDimFilter(dimensionName, value, null));
+    for (String val : values) {
+      fields.add(new SelectorDimFilter(dimensionName, val, null));
+    }
   }
 
   @JsonProperty
@@ -57,20 +74,35 @@ public class OrDimFilter implements DimFilter
   @Override
   public byte[] getCacheKey()
   {
-    return DimFilterCacheHelper.computeCacheKey(DimFilterCacheHelper.OR_CACHE_ID, fields);
+    return DimFilterUtils.computeCacheKey(DimFilterUtils.OR_CACHE_ID, fields);
   }
 
   @Override
   public DimFilter optimize()
   {
-    return Druids.newOrDimFilterBuilder().fields(Lists.transform(this.getFields(), new Function<DimFilter, DimFilter>()
-    {
-      @Override
-      public DimFilter apply(DimFilter input)
-      {
-        return input.optimize();
+    List<DimFilter> elements = DimFilters.optimize(fields);
+    return elements.size() == 1 ? elements.get(0) : new OrDimFilter(elements);
+  }
+
+  @Override
+  public Filter toFilter()
+  {
+    return new OrFilter(Filters.toFilters(fields));
+  }
+
+  @Override
+  public RangeSet<String> getDimensionRangeSet(String dimension)
+  {
+    RangeSet<String> retSet = TreeRangeSet.create();
+    for (DimFilter field : fields) {
+      RangeSet<String> rangeSet = field.getDimensionRangeSet(dimension);
+      if (rangeSet == null) {
+        return null;
+      } else {
+        retSet.addAll(rangeSet);
       }
-    })).build();
+    }
+    return retSet;
   }
 
   @Override
@@ -101,6 +133,6 @@ public class OrDimFilter implements DimFilter
   @Override
   public String toString()
   {
-    return String.format("(%s)", OR_JOINER.join(fields));
+    return StringUtils.format("(%s)", OR_JOINER.join(fields));
   }
 }

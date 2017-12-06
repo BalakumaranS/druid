@@ -21,87 +21,89 @@ package io.druid.segment;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Function;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Ordering;
 import com.google.common.collect.Sets;
-import com.google.common.io.ByteStreams;
 import com.google.common.io.Files;
 import com.google.common.primitives.Ints;
+import com.google.common.primitives.Longs;
 import com.google.inject.Inject;
-import com.metamx.collections.bitmap.BitmapFactory;
-import com.metamx.collections.bitmap.ImmutableBitmap;
-import com.metamx.collections.bitmap.MutableBitmap;
-import com.metamx.collections.spatial.ImmutableRTree;
-import com.metamx.collections.spatial.RTree;
-import com.metamx.collections.spatial.split.LinearGutmanSplitStrategy;
-import com.metamx.common.ISE;
-import com.metamx.common.io.smoosh.FileSmoosher;
-import com.metamx.common.io.smoosh.SmooshedWriter;
-import com.metamx.common.logger.Logger;
 import io.druid.collections.CombiningIterable;
-import io.druid.common.utils.JodaUtils;
+import io.druid.io.ZeroCopyByteArrayOutputStream;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.IAE;
+import io.druid.java.util.common.ISE;
+import io.druid.java.util.common.JodaUtils;
+import io.druid.java.util.common.guava.Comparators;
+import io.druid.java.util.common.guava.FunctionalIterable;
+import io.druid.java.util.common.guava.MergeIterable;
+import io.druid.java.util.common.io.Closer;
+import io.druid.java.util.common.io.smoosh.FileSmoosher;
+import io.druid.java.util.common.io.smoosh.SmooshedWriter;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.segment.column.Column;
 import io.druid.segment.column.ColumnCapabilities;
 import io.druid.segment.column.ColumnCapabilitiesImpl;
 import io.druid.segment.column.ColumnDescriptor;
 import io.druid.segment.column.ValueType;
-import io.druid.segment.data.BitmapSerdeFactory;
-import io.druid.segment.data.ByteBufferWriter;
-import io.druid.segment.data.CompressedObjectStrategy;
-import io.druid.segment.data.CompressedVSizeIndexedV3Writer;
-import io.druid.segment.data.CompressedVSizeIntsIndexedWriter;
+import io.druid.segment.data.CompressionFactory;
+import io.druid.segment.data.CompressionStrategy;
 import io.druid.segment.data.GenericIndexed;
-import io.druid.segment.data.GenericIndexedWriter;
-import io.druid.segment.data.IOPeon;
 import io.druid.segment.data.Indexed;
-import io.druid.segment.data.IndexedIntsWriter;
-import io.druid.segment.data.IndexedRTree;
-import io.druid.segment.data.TmpFileIOPeon;
-import io.druid.segment.data.VSizeIndexedIntsWriter;
-import io.druid.segment.data.VSizeIndexedWriter;
+import io.druid.segment.incremental.IncrementalIndex;
+import io.druid.segment.incremental.IncrementalIndexAdapter;
+import io.druid.segment.loading.MMappedQueryableSegmentizerFactory;
 import io.druid.segment.serde.ComplexColumnPartSerde;
-import io.druid.segment.serde.ComplexColumnSerializer;
 import io.druid.segment.serde.ComplexMetricSerde;
 import io.druid.segment.serde.ComplexMetrics;
-import io.druid.segment.serde.DictionaryEncodedColumnPartSerde;
+import io.druid.segment.serde.DoubleGenericColumnPartSerde;
 import io.druid.segment.serde.FloatGenericColumnPartSerde;
 import io.druid.segment.serde.LongGenericColumnPartSerde;
+import io.druid.segment.writeout.SegmentWriteOutMedium;
+import io.druid.segment.writeout.SegmentWriteOutMediumFactory;
+import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
+import it.unimi.dsi.fastutil.ints.IntIterator;
+import it.unimi.dsi.fastutil.ints.IntSortedSet;
 import org.apache.commons.io.FileUtils;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
 
-import java.io.ByteArrayOutputStream;
+import javax.annotation.Nullable;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
-import java.nio.MappedByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeSet;
 
-public class IndexMergerV9 extends IndexMerger
+public class IndexMergerV9 implements IndexMerger
 {
   private static final Logger log = new Logger(IndexMergerV9.class);
 
+  private final ObjectMapper mapper;
+  private final IndexIO indexIO;
+  private final SegmentWriteOutMediumFactory defaultSegmentWriteOutMediumFactory;
+
   @Inject
-  public IndexMergerV9(
-      ObjectMapper mapper,
-      IndexIO indexIO
-  )
+  public IndexMergerV9(ObjectMapper mapper, IndexIO indexIO, SegmentWriteOutMediumFactory defaultSegmentWriteOutMediumFactory)
   {
-    super(mapper, indexIO);
+    this.mapper = Preconditions.checkNotNull(mapper, "null ObjectMapper");
+    this.indexIO = Preconditions.checkNotNull(indexIO, "null IndexIO");
+    this.defaultSegmentWriteOutMediumFactory =
+        Preconditions.checkNotNull(defaultSegmentWriteOutMediumFactory, "null SegmentWriteOutMediumFactory");
   }
 
-  @Override
-  protected File makeIndexFiles(
+  private File makeIndexFiles(
       final List<IndexableAdapter> adapters,
       final AggregatorFactory[] metricAggs,
       final File outDir,
@@ -109,7 +111,8 @@ public class IndexMergerV9 extends IndexMerger
       final List<String> mergedDimensions,
       final List<String> mergedMetrics,
       final Function<ArrayList<Iterable<Rowboat>>, Iterable<Rowboat>> rowMergerFn,
-      final IndexSpec indexSpec
+      final IndexSpec indexSpec,
+      final @Nullable SegmentWriteOutMediumFactory segmentWriteOutMediumFactory
   ) throws IOException
   {
     progress.start();
@@ -144,102 +147,101 @@ public class IndexMergerV9 extends IndexMerger
       );
     }
 
-    final IOPeon ioPeon = new TmpFileIOPeon(false);
-    final FileSmoosher v9Smoosher = new FileSmoosher(outDir);
-    final File v9TmpDir = new File(outDir, "v9-tmp");
-    v9TmpDir.mkdirs();
-    log.info("Start making v9 index files, outDir:%s", outDir);
+    Closer closer = Closer.create();
+    try {
+      final FileSmoosher v9Smoosher = new FileSmoosher(outDir);
+      FileUtils.forceMkdir(outDir);
 
-    long startTime = System.currentTimeMillis();
-    ByteStreams.write(
-        Ints.toByteArray(IndexIO.V9_VERSION),
-        Files.newOutputStreamSupplier(new File(outDir, "version.bin"))
-    );
-    log.info("Completed version.bin in %,d millis.", System.currentTimeMillis() - startTime);
+      SegmentWriteOutMediumFactory omf = segmentWriteOutMediumFactory != null ? segmentWriteOutMediumFactory
+                                                                              : defaultSegmentWriteOutMediumFactory;
+      log.info("Using SegmentWriteOutMediumFactory[%s]", omf.getClass().getSimpleName());
+      SegmentWriteOutMedium segmentWriteOutMedium = omf.makeSegmentWriteOutMedium(outDir);
+      closer.register(segmentWriteOutMedium);
+      long startTime = System.currentTimeMillis();
+      Files.asByteSink(new File(outDir, "version.bin")).write(Ints.toByteArray(IndexIO.V9_VERSION));
+      log.info("Completed version.bin in %,d millis.", System.currentTimeMillis() - startTime);
 
-    progress.progress();
-    final Map<String, ValueType> metricsValueTypes = Maps.newTreeMap(Ordering.<String>natural().nullsFirst());
-    final Map<String, String> metricTypeNames = Maps.newTreeMap(Ordering.<String>natural().nullsFirst());
-    final List<ColumnCapabilitiesImpl> dimCapabilities = Lists.newArrayListWithCapacity(mergedDimensions.size());
-    mergeCapabilities(adapters, mergedDimensions, metricsValueTypes, metricTypeNames, dimCapabilities);
+      progress.progress();
+      startTime = System.currentTimeMillis();
+      try (FileOutputStream fos = new FileOutputStream(new File(outDir, "factory.json"))) {
+        mapper.writeValue(fos, new MMappedQueryableSegmentizerFactory(indexIO));
+      }
+      log.info("Completed factory.json in %,d millis", System.currentTimeMillis() - startTime);
 
-    /************* Setup Dim Conversions **************/
-    progress.progress();
-    startTime = System.currentTimeMillis();
-    final Map<String, Integer> dimCardinalities = Maps.newHashMap();
-    final ArrayList<GenericIndexedWriter<String>> dimValueWriters = setupDimValueWriters(ioPeon, mergedDimensions);
-    final ArrayList<Map<String, IntBuffer>> dimConversions = Lists.newArrayListWithCapacity(adapters.size());
-    final ArrayList<Boolean> dimensionSkipFlag = Lists.newArrayListWithCapacity(mergedDimensions.size());
-    final ArrayList<Boolean> dimHasNullFlags = Lists.newArrayListWithCapacity(mergedDimensions.size());
-    final ArrayList<Boolean> convertMissingDimsFlags = Lists.newArrayListWithCapacity(mergedDimensions.size());
-    writeDimValueAndSetupDimConversion(
-        adapters, progress, mergedDimensions, dimCardinalities, dimValueWriters, dimensionSkipFlag, dimConversions,
-        convertMissingDimsFlags, dimHasNullFlags
-    );
-    log.info("Completed dim conversions in %,d millis.", System.currentTimeMillis() - startTime);
+      progress.progress();
+      final Map<String, ValueType> metricsValueTypes = Maps.newTreeMap(Comparators.<String>naturalNullsFirst());
+      final Map<String, String> metricTypeNames = Maps.newTreeMap(Comparators.<String>naturalNullsFirst());
+      final List<ColumnCapabilitiesImpl> dimCapabilities = Lists.newArrayListWithCapacity(mergedDimensions.size());
+      mergeCapabilities(adapters, mergedDimensions, metricsValueTypes, metricTypeNames, dimCapabilities);
 
-    /************* Walk through data sets, merge them, and write merged columns *************/
-    progress.progress();
-    final Iterable<Rowboat> theRows = makeRowIterable(
-        adapters,
-        mergedDimensions,
-        mergedMetrics,
-        dimConversions,
-        convertMissingDimsFlags,
-        rowMergerFn
-    );
-    final LongColumnSerializer timeWriter = setupTimeWriter(ioPeon);
-    final ArrayList<IndexedIntsWriter> dimWriters = setupDimensionWriters(
-        ioPeon, mergedDimensions, dimCapabilities, dimCardinalities, indexSpec
-    );
-    final ArrayList<GenericColumnSerializer> metWriters = setupMetricsWriters(
-        ioPeon, mergedMetrics, metricsValueTypes, metricTypeNames, indexSpec
-    );
-    final List<IntBuffer> rowNumConversions = Lists.newArrayListWithCapacity(adapters.size());
-    final ArrayList<MutableBitmap> nullRowsList = Lists.newArrayListWithCapacity(mergedDimensions.size());
-    for (int i = 0; i < mergedDimensions.size(); ++i) {
-      nullRowsList.add(indexSpec.getBitmapSerdeFactory().getBitmapFactory().makeEmptyMutableBitmap());
+      final DimensionHandler[] handlers = makeDimensionHandlers(mergedDimensions, dimCapabilities);
+      final List<DimensionMerger> mergers = new ArrayList<>();
+      for (int i = 0; i < mergedDimensions.size(); i++) {
+        mergers.add(handlers[i].makeMerger(indexSpec, segmentWriteOutMedium, dimCapabilities.get(i), progress));
+      }
+
+      /************* Setup Dim Conversions **************/
+      progress.progress();
+      startTime = System.currentTimeMillis();
+      writeDimValueAndSetupDimConversion(adapters, progress, mergedDimensions, mergers);
+      log.info("Completed dim conversions in %,d millis.", System.currentTimeMillis() - startTime);
+
+      /************* Walk through data sets, merge them, and write merged columns *************/
+      progress.progress();
+      final Iterable<Rowboat> theRows = makeRowIterable(
+          adapters,
+          mergedDimensions,
+          mergedMetrics,
+          rowMergerFn,
+          handlers,
+          mergers
+      );
+      final LongColumnSerializer timeWriter = setupTimeWriter(segmentWriteOutMedium, indexSpec);
+      final ArrayList<GenericColumnSerializer> metWriters = setupMetricsWriters(
+          segmentWriteOutMedium,
+          mergedMetrics,
+          metricsValueTypes,
+          metricTypeNames,
+          indexSpec
+      );
+      final List<IntBuffer> rowNumConversions = Lists.newArrayListWithCapacity(adapters.size());
+
+      mergeIndexesAndWriteColumns(adapters, progress, theRows, timeWriter, metWriters, rowNumConversions, mergers);
+
+      /************ Create Inverted Indexes and Finalize Build Columns *************/
+      final String section = "build inverted index and columns";
+      progress.startSection(section);
+      makeTimeColumn(v9Smoosher, progress, timeWriter);
+      makeMetricsColumns(v9Smoosher, progress, mergedMetrics, metricsValueTypes, metricTypeNames, metWriters);
+
+      for (int i = 0; i < mergedDimensions.size(); i++) {
+        DimensionMergerV9 merger = (DimensionMergerV9) mergers.get(i);
+        merger.writeIndexes(rowNumConversions);
+        if (merger.canSkip()) {
+          continue;
+        }
+        ColumnDescriptor columnDesc = merger.makeColumnDescriptor();
+        makeColumn(v9Smoosher, mergedDimensions.get(i), columnDesc);
+      }
+
+      progress.stopSection(section);
+
+      /************* Make index.drd & metadata.drd files **************/
+      progress.progress();
+      makeIndexBinary(v9Smoosher, adapters, outDir, mergedDimensions, mergedMetrics, progress, indexSpec, mergers);
+      makeMetadataBinary(v9Smoosher, progress, segmentMetadata);
+
+      v9Smoosher.close();
+      progress.stop();
+
+      return outDir;
     }
-    mergeIndexesAndWriteColumns(
-        adapters, progress, theRows, timeWriter, dimWriters, metWriters,
-        dimensionSkipFlag, rowNumConversions, nullRowsList, dimHasNullFlags
-    );
-
-    /************ Create Inverted Indexes *************/
-    progress.progress();
-    final ArrayList<GenericIndexedWriter<ImmutableBitmap>> bitmapIndexWriters = setupBitmapIndexWriters(
-        ioPeon, mergedDimensions, indexSpec
-    );
-    final ArrayList<ByteBufferWriter<ImmutableRTree>> spatialIndexWriters = setupSpatialIndexWriters(
-        ioPeon, mergedDimensions, indexSpec, dimCapabilities
-    );
-    makeInvertedIndexes(
-        adapters, progress, mergedDimensions, indexSpec, v9TmpDir, rowNumConversions,
-        nullRowsList, dimValueWriters, bitmapIndexWriters, spatialIndexWriters, dimConversions
-    );
-
-    /************ Finalize Build Columns *************/
-    progress.progress();
-    makeTimeColumn(v9Smoosher, progress, timeWriter);
-    makeMetricsColumns(v9Smoosher, progress, mergedMetrics, metricsValueTypes, metricTypeNames, metWriters);
-    makeDimensionColumns(
-        v9Smoosher, progress, indexSpec, mergedDimensions, dimensionSkipFlag, dimCapabilities,
-        dimValueWriters, dimWriters, bitmapIndexWriters, spatialIndexWriters
-    );
-
-    /************* Make index.drd & metadata.drd files **************/
-    progress.progress();
-    makeIndexBinary(
-        v9Smoosher, adapters, outDir, mergedDimensions, dimensionSkipFlag, mergedMetrics, progress, indexSpec
-    );
-    makeMetadataBinary(v9Smoosher, progress, segmentMetadata);
-
-    v9Smoosher.close();
-    ioPeon.cleanup();
-    FileUtils.deleteDirectory(v9TmpDir);
-    progress.stop();
-
-    return outDir;
+    catch (Throwable t) {
+      throw closer.rethrow(t);
+    }
+    finally {
+      closer.close();
+    }
   }
 
   private void makeMetadataBinary(
@@ -260,10 +262,10 @@ public class IndexMergerV9 extends IndexMerger
       final List<IndexableAdapter> adapters,
       final File outDir,
       final List<String> mergedDimensions,
-      final ArrayList<Boolean> dimensionSkipFlag,
       final List<String> mergedMetrics,
       final ProgressIndicator progress,
-      final IndexSpec indexSpec
+      final IndexSpec indexSpec,
+      final List<DimensionMerger> mergers
   ) throws IOException
   {
     final String section = "make index.drd";
@@ -274,7 +276,7 @@ public class IndexMergerV9 extends IndexMerger
     final Set<String> finalColumns = Sets.newLinkedHashSet();
     finalColumns.addAll(mergedMetrics);
     for (int i = 0; i < mergedDimensions.size(); ++i) {
-      if (dimensionSkipFlag.get(i)) {
+      if (mergers.get(i).canSkip()) {
         continue;
       }
       finalColumns.add(mergedDimensions.get(i));
@@ -291,11 +293,11 @@ public class IndexMergerV9 extends IndexMerger
                           + serializerUtils.getSerializedStringByteSize(bitmapSerdeFactoryType);
 
     final SmooshedWriter writer = v9Smoosher.addWithSmooshedWriter("index.drd", numBytes);
-    cols.writeToChannel(writer);
-    dims.writeToChannel(writer);
+    cols.writeTo(writer, v9Smoosher);
+    dims.writeTo(writer, v9Smoosher);
 
-    DateTime minTime = new DateTime(JodaUtils.MAX_INSTANT);
-    DateTime maxTime = new DateTime(JodaUtils.MIN_INSTANT);
+    DateTime minTime = DateTimes.MAX;
+    DateTime maxTime = DateTimes.MIN;
 
     for (IndexableAdapter index : adapters) {
       minTime = JodaUtils.minDateTime(minTime, index.getDataInterval().getStart());
@@ -306,72 +308,12 @@ public class IndexMergerV9 extends IndexMerger
     serializerUtils.writeLong(writer, dataInterval.getStartMillis());
     serializerUtils.writeLong(writer, dataInterval.getEndMillis());
 
-    serializerUtils.writeString(
-        writer, bitmapSerdeFactoryType
-    );
+    serializerUtils.writeString(writer, bitmapSerdeFactoryType);
     writer.close();
 
     IndexIO.checkFileSize(new File(outDir, "index.drd"));
     log.info("Completed index.drd in %,d millis.", System.currentTimeMillis() - startTime);
 
-    progress.stopSection(section);
-  }
-
-  private void makeDimensionColumns(
-      final FileSmoosher v9Smoosher,
-      final ProgressIndicator progress,
-      final IndexSpec indexSpec,
-      final List<String> mergedDimensions,
-      final ArrayList<Boolean> dimensionSkipFlag,
-      final List<ColumnCapabilitiesImpl> dimCapabilities,
-      final ArrayList<GenericIndexedWriter<String>> dimValueWriters,
-      final ArrayList<IndexedIntsWriter> dimWriters,
-      final ArrayList<GenericIndexedWriter<ImmutableBitmap>> bitmapIndexWriters,
-      final ArrayList<ByteBufferWriter<ImmutableRTree>> spatialIndexWriters
-  ) throws IOException
-  {
-    final String section = "make dimension columns";
-    progress.startSection(section);
-
-    long startTime = System.currentTimeMillis();
-    final BitmapSerdeFactory bitmapSerdeFactory = indexSpec.getBitmapSerdeFactory();
-    final CompressedObjectStrategy.CompressionStrategy compressionStrategy = indexSpec.getDimensionCompressionStrategy();
-    for (int i = 0; i < mergedDimensions.size(); ++i) {
-      long dimStartTime = System.currentTimeMillis();
-      final String dim = mergedDimensions.get(i);
-      final IndexedIntsWriter dimWriter = dimWriters.get(i);
-      final GenericIndexedWriter<ImmutableBitmap> bitmapIndexWriter = bitmapIndexWriters.get(i);
-      final ByteBufferWriter<ImmutableRTree> spatialIndexWriter = spatialIndexWriters.get(i);
-
-      dimWriter.close();
-      bitmapIndexWriter.close();
-      if (spatialIndexWriter != null) {
-        spatialIndexWriter.close();
-      }
-      if (dimensionSkipFlag.get(i)) {
-        continue;
-      }
-
-      boolean hasMultiValue = dimCapabilities.get(i).hasMultipleValues();
-
-      final ColumnDescriptor.Builder builder = ColumnDescriptor.builder();
-      builder.setValueType(ValueType.STRING);
-      builder.setHasMultipleValues(hasMultiValue);
-      final DictionaryEncodedColumnPartSerde.SerializerBuilder partBuilder = DictionaryEncodedColumnPartSerde
-          .serializerBuilder()
-          .withDictionary(dimValueWriters.get(i))
-          .withValue(dimWriters.get(i), hasMultiValue, compressionStrategy != null)
-          .withBitmapSerdeFactory(bitmapSerdeFactory)
-          .withBitmapIndex(bitmapIndexWriters.get(i))
-          .withSpatialIndex(spatialIndexWriters.get(i))
-          .withByteOrder(IndexIO.BYTE_ORDER);
-      final ColumnDescriptor serdeficator = builder
-          .addSerde(partBuilder.build())
-          .build();
-      makeColumn(v9Smoosher, dim, serdeficator);
-      log.info("Completed dimension column[%s] in %,d millis.", dim, System.currentTimeMillis() - dimStartTime);
-    }
-    log.info("Completed dimension columns in %,d millis.", System.currentTimeMillis() - startTime);
     progress.stopSection(section);
   }
 
@@ -392,7 +334,6 @@ public class IndexMergerV9 extends IndexMerger
       String metric = mergedMetrics.get(i);
       long metricStartTime = System.currentTimeMillis();
       GenericColumnSerializer writer = metWriters.get(i);
-      writer.close();
 
       final ColumnDescriptor.Builder builder = ColumnDescriptor.builder();
       ValueType type = metricsValueTypes.get(metric);
@@ -400,28 +341,42 @@ public class IndexMergerV9 extends IndexMerger
         case LONG:
           builder.setValueType(ValueType.LONG);
           builder.addSerde(
-              LongGenericColumnPartSerde.serializerBuilder()
-                                        .withByteOrder(IndexIO.BYTE_ORDER)
-                                        .withDelegate((LongColumnSerializer) writer)
-                                        .build()
+              LongGenericColumnPartSerde
+                  .serializerBuilder()
+                  .withByteOrder(IndexIO.BYTE_ORDER)
+                  .withDelegate((LongColumnSerializer) writer)
+                  .build()
           );
           break;
         case FLOAT:
           builder.setValueType(ValueType.FLOAT);
           builder.addSerde(
-              FloatGenericColumnPartSerde.serializerBuilder()
-                                         .withByteOrder(IndexIO.BYTE_ORDER)
-                                         .withDelegate((FloatColumnSerializer) writer)
-                                         .build()
+              FloatGenericColumnPartSerde
+                  .serializerBuilder()
+                  .withByteOrder(IndexIO.BYTE_ORDER)
+                  .withDelegate((FloatColumnSerializer) writer)
+                  .build()
+          );
+          break;
+        case DOUBLE:
+          builder.setValueType(ValueType.DOUBLE);
+          builder.addSerde(
+              DoubleGenericColumnPartSerde
+                  .serializerBuilder()
+                  .withByteOrder(IndexIO.BYTE_ORDER)
+                  .withDelegate((DoubleColumnSerializer) writer)
+                  .build()
           );
           break;
         case COMPLEX:
           final String typeName = metricTypeNames.get(metric);
           builder.setValueType(ValueType.COMPLEX);
           builder.addSerde(
-              ComplexColumnPartSerde.serializerBuilder().withTypeName(typeName)
-                                    .withDelegate((ComplexColumnSerializer) writer)
-                                    .build()
+              ComplexColumnPartSerde
+                  .serializerBuilder()
+                  .withTypeName(typeName)
+                  .withDelegate(writer)
+                  .build()
           );
           break;
         default:
@@ -434,7 +389,6 @@ public class IndexMergerV9 extends IndexMerger
     progress.stopSection(section);
   }
 
-
   private void makeTimeColumn(
       final FileSmoosher v9Smoosher,
       final ProgressIndicator progress,
@@ -444,8 +398,6 @@ public class IndexMergerV9 extends IndexMerger
     final String section = "make time column";
     progress.startSection(section);
     long startTime = System.currentTimeMillis();
-
-    timeWriter.close();
 
     final ColumnDescriptor serdeficator = ColumnDescriptor
         .builder()
@@ -468,167 +420,15 @@ public class IndexMergerV9 extends IndexMerger
       final ColumnDescriptor serdeficator
   ) throws IOException
   {
-    ByteArrayOutputStream baos = new ByteArrayOutputStream();
-    serializerUtils.writeString(baos, mapper.writeValueAsString(serdeficator));
-    byte[] specBytes = baos.toByteArray();
-
-    final SmooshedWriter channel = v9Smoosher.addWithSmooshedWriter(
-        columnName, serdeficator.numBytes() + specBytes.length
-    );
-    try {
-      channel.write(ByteBuffer.wrap(specBytes));
-      serdeficator.write(channel);
+    ZeroCopyByteArrayOutputStream specBytes = new ZeroCopyByteArrayOutputStream();
+    serializerUtils.writeString(specBytes, mapper.writeValueAsString(serdeficator));
+    try (SmooshedWriter channel = v9Smoosher.addWithSmooshedWriter(
+        columnName,
+        specBytes.size() + serdeficator.getSerializedSize()
+    )) {
+      specBytes.writeTo(channel);
+      serdeficator.writeTo(channel, v9Smoosher);
     }
-    finally {
-      channel.close();
-    }
-  }
-
-  private void makeInvertedIndexes(
-      final List<IndexableAdapter> adapters,
-      final ProgressIndicator progress,
-      final List<String> mergedDimensions,
-      final IndexSpec indexSpec,
-      final File v9OutDir,
-      final List<IntBuffer> rowNumConversions,
-      final ArrayList<MutableBitmap> nullRowsList,
-      final ArrayList<GenericIndexedWriter<String>> dimValueWriters,
-      final ArrayList<GenericIndexedWriter<ImmutableBitmap>> bitmapIndexWriters,
-      final ArrayList<ByteBufferWriter<ImmutableRTree>> spatialIndexWriters,
-      final ArrayList<Map<String, IntBuffer>> dimConversions
-  ) throws IOException
-  {
-    final String section = "build inverted index";
-    progress.startSection(section);
-
-    long startTime = System.currentTimeMillis();
-    final BitmapSerdeFactory bitmapSerdeFactory = indexSpec.getBitmapSerdeFactory();
-    for (int dimIndex = 0; dimIndex < mergedDimensions.size(); ++dimIndex) {
-      String dimension = mergedDimensions.get(dimIndex);
-      long dimStartTime = System.currentTimeMillis();
-
-      // write dim values to one single file because we need to read it
-      File dimValueFile = IndexIO.makeDimFile(v9OutDir, dimension);
-      FileOutputStream fos = new FileOutputStream(dimValueFile);
-      ByteStreams.copy(dimValueWriters.get(dimIndex).combineStreams(), fos);
-      fos.close();
-
-      final MappedByteBuffer dimValsMapped = Files.map(dimValueFile);
-      Indexed<String> dimVals = GenericIndexed.read(dimValsMapped, GenericIndexed.STRING_STRATEGY);
-
-      ByteBufferWriter<ImmutableRTree> spatialIndexWriter = spatialIndexWriters.get(dimIndex);
-      RTree tree = null;
-      if (spatialIndexWriter != null) {
-        BitmapFactory bitmapFactory = bitmapSerdeFactory.getBitmapFactory();
-        tree = new RTree(2, new LinearGutmanSplitStrategy(0, 50, bitmapFactory), bitmapFactory);
-      }
-
-      IndexSeeker[] dictIdSeeker = toIndexSeekers(adapters, dimConversions, dimension);
-
-      ImmutableBitmap nullRowBitmap = bitmapSerdeFactory.getBitmapFactory().makeImmutableBitmap(
-          nullRowsList.get(dimIndex)
-      );
-
-      //Iterate all dim values's dictionary id in ascending order which in line with dim values's compare result.
-      for (int dictId = 0; dictId < dimVals.size(); dictId++) {
-        progress.progress();
-        List<Iterable<Integer>> convertedInverteds = Lists.newArrayListWithCapacity(adapters.size());
-        for (int j = 0; j < adapters.size(); ++j) {
-          int seekedDictId = dictIdSeeker[j].seek(dictId);
-          if (seekedDictId != IndexSeeker.NOT_EXIST) {
-            convertedInverteds.add(
-                new ConvertingIndexedInts(
-                    adapters.get(j).getBitmapIndex(dimension, seekedDictId), rowNumConversions.get(j)
-                )
-            );
-          }
-        }
-
-        MutableBitmap bitset = bitmapSerdeFactory.getBitmapFactory().makeEmptyMutableBitmap();
-        for (Integer row : CombiningIterable.createSplatted(
-            convertedInverteds,
-            Ordering.<Integer>natural().nullsFirst()
-        )) {
-          if (row != INVALID_ROW) {
-            bitset.add(row);
-          }
-        }
-
-        ImmutableBitmap bitmapToWrite = bitmapSerdeFactory.getBitmapFactory().makeImmutableBitmap(bitset);
-        if ((dictId == 0) && (Iterables.getFirst(dimVals, "") == null)) {
-          bitmapToWrite = nullRowBitmap.union(bitmapToWrite);
-        }
-        bitmapIndexWriters.get(dimIndex).write(bitmapToWrite);
-
-        if (spatialIndexWriter != null) {
-          String dimVal = dimVals.get(dictId);
-          if (dimVal != null) {
-            List<String> stringCoords = Lists.newArrayList(SPLITTER.split(dimVal));
-            float[] coords = new float[stringCoords.size()];
-            for (int j = 0; j < coords.length; j++) {
-              coords[j] = Float.valueOf(stringCoords.get(j));
-            }
-            tree.insert(coords, bitset);
-          }
-        }
-      }
-      if (spatialIndexWriter != null) {
-        spatialIndexWriter.write(ImmutableRTree.newImmutableFromMutable(tree));
-      }
-      log.info(
-          "Completed dim[%s] inverted with cardinality[%,d] in %,d millis.",
-          dimension,
-          dimVals.size(),
-          System.currentTimeMillis() - dimStartTime
-      );
-    }
-    log.info("Completed inverted index in %,d millis.", System.currentTimeMillis() - startTime);
-    progress.stopSection(section);
-  }
-
-
-  private ArrayList<GenericIndexedWriter<ImmutableBitmap>> setupBitmapIndexWriters(
-      final IOPeon ioPeon,
-      final List<String> mergedDimensions,
-      final IndexSpec indexSpec
-  ) throws IOException
-  {
-    ArrayList<GenericIndexedWriter<ImmutableBitmap>> writers = Lists.newArrayListWithCapacity(mergedDimensions.size());
-    final BitmapSerdeFactory bitmapSerdeFactory = indexSpec.getBitmapSerdeFactory();
-    for (String dimension : mergedDimensions) {
-      GenericIndexedWriter<ImmutableBitmap> writer = new GenericIndexedWriter<>(
-          ioPeon, String.format("%s.inverted", dimension), bitmapSerdeFactory.getObjectStrategy()
-      );
-      writer.open();
-      writers.add(writer);
-    }
-    return writers;
-  }
-
-  private ArrayList<ByteBufferWriter<ImmutableRTree>> setupSpatialIndexWriters(
-      final IOPeon ioPeon,
-      final List<String> mergedDimensions,
-      final IndexSpec indexSpec,
-      final List<ColumnCapabilitiesImpl> dimCapabilities
-  ) throws IOException
-  {
-    ArrayList<ByteBufferWriter<ImmutableRTree>> writers = Lists.newArrayListWithCapacity(mergedDimensions.size());
-    final BitmapSerdeFactory bitmapSerdeFactory = indexSpec.getBitmapSerdeFactory();
-    for (int dimIndex = 0; dimIndex < mergedDimensions.size(); ++dimIndex) {
-      if (dimCapabilities.get(dimIndex).hasSpatialIndexes()) {
-        BitmapFactory bitmapFactory = bitmapSerdeFactory.getBitmapFactory();
-        ByteBufferWriter<ImmutableRTree> writer = new ByteBufferWriter<>(
-            ioPeon,
-            String.format("%s.spatial", mergedDimensions.get(dimIndex)),
-            new IndexedRTree.ImmutableRTreeObjectStrategy(bitmapFactory)
-        );
-        writer.open();
-        writers.add(writer);
-      } else {
-        writers.add(null);
-      }
-    }
-    return writers;
   }
 
   private void mergeIndexesAndWriteColumns(
@@ -636,12 +436,9 @@ public class IndexMergerV9 extends IndexMerger
       final ProgressIndicator progress,
       final Iterable<Rowboat> theRows,
       final LongColumnSerializer timeWriter,
-      final ArrayList<IndexedIntsWriter> dimWriters,
       final ArrayList<GenericColumnSerializer> metWriters,
-      final ArrayList<Boolean> dimensionSkipFlag,
       final List<IntBuffer> rowNumConversions,
-      final ArrayList<MutableBitmap> nullRowsList,
-      final ArrayList<Boolean> dimHasNullFlags
+      final List<DimensionMerger> mergers
   ) throws IOException
   {
     final String section = "walk through and merge rows";
@@ -665,31 +462,30 @@ public class IndexMergerV9 extends IndexMerger
         metWriters.get(i).serialize(metrics[i]);
       }
 
-      int[][] dims = theRow.getDims();
+      Object[] dims = theRow.getDims();
       for (int i = 0; i < dims.length; ++i) {
-        if (dimensionSkipFlag.get(i)) {
+        DimensionMerger merger = mergers.get(i);
+        if (merger.canSkip()) {
           continue;
         }
-        if (dims[i] == null || dims[i].length == 0) {
-          nullRowsList.get(i).add(rowCount);
-        } else if (dimHasNullFlags.get(i) && dims[i].length == 1 && dims[i][0] == 0) {
-          // If this dimension has the null/empty str in its dictionary, a row with a single-valued dimension
-          // that matches the null/empty str's dictionary ID should also be added to nullRowsList.
-          nullRowsList.get(i).add(rowCount);
-        }
-        dimWriters.get(i).add(dims[i]);
+        merger.processMergedRow(dims[i]);
       }
 
-      for (Map.Entry<Integer, TreeSet<Integer>> comprisedRow : theRow.getComprisedRows().entrySet()) {
-        final IntBuffer conversionBuffer = rowNumConversions.get(comprisedRow.getKey());
+      Iterator<Int2ObjectMap.Entry<IntSortedSet>> rowsIterator = theRow.getComprisedRows().int2ObjectEntrySet().fastIterator();
+      while (rowsIterator.hasNext()) {
+        Int2ObjectMap.Entry<IntSortedSet> comprisedRow = rowsIterator.next();
 
-        for (Integer rowNum : comprisedRow.getValue()) {
+        final IntBuffer conversionBuffer = rowNumConversions.get(comprisedRow.getIntKey());
+
+        for (IntIterator setIterator = comprisedRow.getValue().iterator(); setIterator.hasNext(); /* NOP */) {
+          int rowNum = setIterator.nextInt();
           while (conversionBuffer.position() < rowNum) {
             conversionBuffer.put(INVALID_ROW);
           }
           conversionBuffer.put(rowCount);
         }
       }
+
       if ((++rowCount % 500000) == 0) {
         log.info("walked 500,000/%d rows in %,d millis.", rowCount, System.currentTimeMillis() - time);
         time = System.currentTimeMillis();
@@ -702,10 +498,13 @@ public class IndexMergerV9 extends IndexMerger
     progress.stopSection(section);
   }
 
-  private LongColumnSerializer setupTimeWriter(final IOPeon ioPeon) throws IOException
+  private LongColumnSerializer setupTimeWriter(SegmentWriteOutMedium segmentWriteOutMedium, IndexSpec indexSpec) throws IOException
   {
     LongColumnSerializer timeWriter = LongColumnSerializer.create(
-        ioPeon, "little_end_time", CompressedObjectStrategy.DEFAULT_COMPRESSION_STRATEGY
+        segmentWriteOutMedium,
+        "little_end_time",
+        CompressionStrategy.DEFAULT_COMPRESSION_STRATEGY,
+        indexSpec.getLongEncoding()
     );
     // we will close this writer after we added all the timestamps
     timeWriter.open();
@@ -713,7 +512,7 @@ public class IndexMergerV9 extends IndexMerger
   }
 
   private ArrayList<GenericColumnSerializer> setupMetricsWriters(
-      final IOPeon ioPeon,
+      final SegmentWriteOutMedium segmentWriteOutMedium,
       final List<String> mergedMetrics,
       final Map<String, ValueType> metricsValueTypes,
       final Map<String, String> metricTypeNames,
@@ -721,16 +520,20 @@ public class IndexMergerV9 extends IndexMerger
   ) throws IOException
   {
     ArrayList<GenericColumnSerializer> metWriters = Lists.newArrayListWithCapacity(mergedMetrics.size());
-    final CompressedObjectStrategy.CompressionStrategy metCompression = indexSpec.getMetricCompressionStrategy();
+    final CompressionStrategy metCompression = indexSpec.getMetricCompression();
+    final CompressionFactory.LongEncodingStrategy longEncoding = indexSpec.getLongEncoding();
     for (String metric : mergedMetrics) {
       ValueType type = metricsValueTypes.get(metric);
       GenericColumnSerializer writer;
       switch (type) {
         case LONG:
-          writer = LongColumnSerializer.create(ioPeon, metric, metCompression);
+          writer = LongColumnSerializer.create(segmentWriteOutMedium, metric, metCompression, longEncoding);
           break;
         case FLOAT:
-          writer = FloatColumnSerializer.create(ioPeon, metric, metCompression);
+          writer = FloatColumnSerializer.create(segmentWriteOutMedium, metric, metCompression);
+          break;
+        case DOUBLE:
+          writer = DoubleColumnSerializer.create(segmentWriteOutMedium, metric, metCompression);
           break;
         case COMPLEX:
           final String typeName = metricTypeNames.get(metric);
@@ -738,7 +541,7 @@ public class IndexMergerV9 extends IndexMerger
           if (serde == null) {
             throw new ISE("Unknown type[%s]", typeName);
           }
-          writer = ComplexColumnSerializer.create(ioPeon, metric, serde);
+          writer = serde.getSerializer(segmentWriteOutMedium, metric);
           break;
         default:
           throw new ISE("Unknown type[%s]", type);
@@ -750,153 +553,18 @@ public class IndexMergerV9 extends IndexMerger
     return metWriters;
   }
 
-  private ArrayList<IndexedIntsWriter> setupDimensionWriters(
-      final IOPeon ioPeon,
-      final List<String> mergedDimensions,
-      final List<ColumnCapabilitiesImpl> dimCapabilities,
-      final Map<String, Integer> dimCardinalities,
-      final IndexSpec indexSpec
-  ) throws IOException
-  {
-    ArrayList<IndexedIntsWriter> dimWriters = Lists.newArrayListWithCapacity(mergedDimensions.size());
-    final CompressedObjectStrategy.CompressionStrategy dimCompression = indexSpec.getDimensionCompressionStrategy();
-    for (int dimIndex = 0; dimIndex < mergedDimensions.size(); ++dimIndex) {
-      String dim = mergedDimensions.get(dimIndex);
-      int cardinality = dimCardinalities.get(dim);
-      ColumnCapabilitiesImpl capabilities = dimCapabilities.get(dimIndex);
-      String filenameBase = String.format("%s.forward_dim", dim);
-      IndexedIntsWriter writer;
-      if (capabilities.hasMultipleValues()) {
-        writer = (dimCompression != null)
-                 ? CompressedVSizeIndexedV3Writer.create(ioPeon, filenameBase, cardinality, dimCompression)
-                 : new VSizeIndexedWriter(ioPeon, filenameBase, cardinality);
-      } else {
-        writer = (dimCompression != null)
-                 ? CompressedVSizeIntsIndexedWriter.create(ioPeon, filenameBase, cardinality, dimCompression)
-                 : new VSizeIndexedIntsWriter(ioPeon, filenameBase, cardinality);
-      }
-      writer.open();
-      // we will close these writers in another method after we added all the values
-      dimWriters.add(writer);
-    }
-    return dimWriters;
-  }
-
-  private ArrayList<GenericIndexedWriter<String>> setupDimValueWriters(
-      final IOPeon ioPeon,
-      final List<String> mergedDimensions
-  )
-      throws IOException
-  {
-    ArrayList<GenericIndexedWriter<String>> dimValueWriters = Lists.newArrayListWithCapacity(mergedDimensions.size());
-    for (String dimension : mergedDimensions) {
-      final GenericIndexedWriter<String> writer = new GenericIndexedWriter<>(
-          ioPeon, String.format("%s.dim_values", dimension), GenericIndexed.STRING_STRATEGY
-      );
-      writer.open();
-      dimValueWriters.add(writer);
-    }
-    return dimValueWriters;
-  }
-
   private void writeDimValueAndSetupDimConversion(
       final List<IndexableAdapter> indexes,
       final ProgressIndicator progress,
       final List<String> mergedDimensions,
-      final Map<String, Integer> dimensionCardinalities,
-      final ArrayList<GenericIndexedWriter<String>> dimValueWriters,
-      final ArrayList<Boolean> dimensionSkipFlag,
-      final List<Map<String, IntBuffer>> dimConversions,
-      final ArrayList<Boolean> convertMissingDimsFlags,
-      final ArrayList<Boolean> dimHasNullFlags
+      final List<DimensionMerger> mergers
   ) throws IOException
   {
     final String section = "setup dimension conversions";
     progress.startSection(section);
 
-    for (int i = 0; i < indexes.size(); ++i) {
-      dimConversions.add(Maps.<String, IntBuffer>newHashMap());
-    }
-
     for (int dimIndex = 0; dimIndex < mergedDimensions.size(); ++dimIndex) {
-      long dimStartTime = System.currentTimeMillis();
-      String dimension = mergedDimensions.get(dimIndex);
-      boolean dimHasNull = false;
-      boolean dimHasValues = false;
-      boolean dimAbsentFromSomeIndex = false;
-
-      int numMergeIndex = 0;
-      Indexed<String> dimValueLookup = null;
-      Indexed<String>[] dimValueLookups = new Indexed[indexes.size() + 1];
-      for (int i = 0; i < indexes.size(); i++) {
-        Indexed<String> dimValues = indexes.get(i).getDimValueLookup(dimension);
-        if (!isNullColumn(dimValues)) {
-          dimHasValues = true;
-          dimHasNull |= dimValues.indexOf(null) >= 0;
-          dimValueLookups[i] = dimValueLookup = dimValues;
-          numMergeIndex++;
-        } else {
-          dimAbsentFromSomeIndex = true;
-        }
-      }
-
-      boolean convertMissingDims = dimHasValues && dimAbsentFromSomeIndex;
-      convertMissingDimsFlags.add(convertMissingDims);
-
-      /*
-       * Ensure the empty str is always in the dictionary if the dimension was missing from one index but
-       * has non-null values in another index.
-       * This is done so that MMappedIndexRowIterable can convert null columns to empty strings
-       * later on, to allow rows from indexes without a particular dimension to merge correctly with
-       * rows from indexes with null/empty str values for that dimension.
-       */
-      if (convertMissingDims && !dimHasNull) {
-        dimHasNull = true;
-        dimValueLookups[indexes.size()] = dimValueLookup = EMPTY_STR_DIM_VAL;
-        numMergeIndex++;
-      }
-
-      GenericIndexedWriter<String> writer = dimValueWriters.get(dimIndex);
-
-      int cardinality = 0;
-      if (numMergeIndex > 1) {
-        DictionaryMergeIterator iterator = new DictionaryMergeIterator(dimValueLookups, true);
-
-        while (iterator.hasNext()) {
-          writer.write(iterator.next());
-        }
-
-        for (int i = 0; i < indexes.size(); i++) {
-          if (dimValueLookups[i] != null && iterator.needConversion(i)) {
-            dimConversions.get(i).put(dimension, iterator.conversions[i]);
-          }
-        }
-        cardinality = iterator.counter;
-      } else if (numMergeIndex == 1) {
-        for (String value : dimValueLookup) {
-          writer.write(value);
-        }
-        cardinality = dimValueLookup.size();
-      }
-
-      // Mark if this dim has the null/empty str value in its dictionary, used for determining nullRowsList later.
-      dimHasNullFlags.add(dimHasNull);
-
-      log.info(
-          "Completed dim[%s] conversions with cardinality[%,d] in %,d millis.",
-          dimension,
-          cardinality,
-          System.currentTimeMillis() - dimStartTime
-      );
-      dimensionCardinalities.put(dimension, cardinality);
-      writer.close();
-
-      if (cardinality == 0) {
-        log.info(String.format("Skipping [%s], it is empty!", dimension));
-        dimensionSkipFlag.add(true);
-        continue;
-      }
-      dimensionSkipFlag.add(false);
+      mergers.get(dimIndex).writeMergedValueMetadata(indexes);
     }
     progress.stopSection(section);
   }
@@ -915,7 +583,7 @@ public class IndexMergerV9 extends IndexMerger
         ColumnCapabilitiesImpl mergedCapabilities = capabilitiesMap.get(dimension);
         if (mergedCapabilities == null) {
           mergedCapabilities = new ColumnCapabilitiesImpl();
-          mergedCapabilities.setType(ValueType.STRING);
+          mergedCapabilities.setType(null);
         }
         capabilitiesMap.put(dimension, mergedCapabilities.merge(adapter.getCapabilities(dimension)));
       }
@@ -934,4 +602,463 @@ public class IndexMergerV9 extends IndexMerger
       dimCapabilities.add(capabilitiesMap.get(dim));
     }
   }
+
+  @Override
+  public File persist(
+      final IncrementalIndex index,
+      File outDir,
+      IndexSpec indexSpec,
+      @Nullable SegmentWriteOutMediumFactory segmentWriteOutMediumFactory
+  ) throws IOException
+  {
+    return persist(index, index.getInterval(), outDir, indexSpec, segmentWriteOutMediumFactory);
+  }
+
+  @Override
+  public File persist(
+      final IncrementalIndex index,
+      final Interval dataInterval,
+      File outDir,
+      IndexSpec indexSpec,
+      @Nullable SegmentWriteOutMediumFactory segmentWriteOutMediumFactory
+  ) throws IOException
+  {
+    return persist(index, dataInterval, outDir, indexSpec, new BaseProgressIndicator(), segmentWriteOutMediumFactory);
+  }
+
+  @Override
+  public File persist(
+      final IncrementalIndex index,
+      final Interval dataInterval,
+      File outDir,
+      IndexSpec indexSpec,
+      ProgressIndicator progress,
+      @Nullable SegmentWriteOutMediumFactory segmentWriteOutMediumFactory
+  ) throws IOException
+  {
+    if (index.isEmpty()) {
+      throw new IAE("Trying to persist an empty index!");
+    }
+
+    final DateTime firstTimestamp = index.getMinTime();
+    final DateTime lastTimestamp = index.getMaxTime();
+    if (!(dataInterval.contains(firstTimestamp) && dataInterval.contains(lastTimestamp))) {
+      throw new IAE(
+          "interval[%s] does not encapsulate the full range of timestamps[%s, %s]",
+          dataInterval,
+          firstTimestamp,
+          lastTimestamp
+      );
+    }
+
+    FileUtils.forceMkdir(outDir);
+
+    log.info("Starting persist for interval[%s], rows[%,d]", dataInterval, index.size());
+    return merge(
+        Arrays.<IndexableAdapter>asList(
+            new IncrementalIndexAdapter(
+                dataInterval,
+                index,
+                indexSpec.getBitmapSerdeFactory().getBitmapFactory()
+            )
+        ),
+        // if index is not rolled up, then it should be not rollup here
+        // if index is rolled up, then it is no need to rollup again.
+        //                     In this case, true/false won't cause reOrdering in merge stage
+        //                     while merging a single iterable
+        false,
+        index.getMetricAggs(),
+        outDir,
+        indexSpec,
+        progress,
+        segmentWriteOutMediumFactory
+    );
+  }
+
+  @Override
+  public File mergeQueryableIndex(
+      List<QueryableIndex> indexes,
+      boolean rollup,
+      final AggregatorFactory[] metricAggs,
+      File outDir,
+      IndexSpec indexSpec,
+      @Nullable SegmentWriteOutMediumFactory segmentWriteOutMediumFactory
+  ) throws IOException
+  {
+    return mergeQueryableIndex(
+        indexes,
+        rollup,
+        metricAggs,
+        outDir,
+        indexSpec,
+        new BaseProgressIndicator(),
+        segmentWriteOutMediumFactory
+    );
+  }
+
+  @Override
+  public File mergeQueryableIndex(
+      List<QueryableIndex> indexes,
+      boolean rollup,
+      final AggregatorFactory[] metricAggs,
+      File outDir,
+      IndexSpec indexSpec,
+      ProgressIndicator progress,
+      @Nullable SegmentWriteOutMediumFactory segmentWriteOutMediumFactory
+  ) throws IOException
+  {
+    return merge(
+        IndexMerger.toIndexableAdapters(indexes),
+        rollup,
+        metricAggs,
+        outDir,
+        indexSpec,
+        progress,
+        segmentWriteOutMediumFactory
+    );
+  }
+
+  @Override
+  public File merge(
+      List<IndexableAdapter> indexes,
+      boolean rollup,
+      final AggregatorFactory[] metricAggs,
+      File outDir,
+      IndexSpec indexSpec
+  ) throws IOException
+  {
+    return merge(indexes, rollup, metricAggs, outDir, indexSpec, new BaseProgressIndicator(), null);
+  }
+
+  private File merge(
+      List<IndexableAdapter> indexes,
+      final boolean rollup,
+      final AggregatorFactory[] metricAggs,
+      File outDir,
+      IndexSpec indexSpec,
+      ProgressIndicator progress,
+      @Nullable SegmentWriteOutMediumFactory segmentWriteOutMediumFactory
+  ) throws IOException
+  {
+    FileUtils.deleteDirectory(outDir);
+    FileUtils.forceMkdir(outDir);
+
+    final List<String> mergedDimensions = IndexMerger.getMergedDimensions(indexes);
+
+    final List<String> mergedMetrics = Lists.transform(
+        IndexMerger.mergeIndexed(
+            Lists.newArrayList(
+                FunctionalIterable
+                    .create(indexes)
+                    .transform(
+                        new Function<IndexableAdapter, Iterable<String>>()
+                        {
+                          @Override
+                          public Iterable<String> apply(@Nullable IndexableAdapter input)
+                          {
+                            return input.getMetricNames();
+                          }
+                        }
+                    )
+            )
+        ),
+        new Function<String, String>()
+        {
+          @Override
+          public String apply(@Nullable String input)
+          {
+            return input;
+          }
+        }
+    );
+
+    final AggregatorFactory[] sortedMetricAggs = new AggregatorFactory[mergedMetrics.size()];
+    for (AggregatorFactory metricAgg : metricAggs) {
+      int metricIndex = mergedMetrics.indexOf(metricAgg.getName());
+      /*
+        If metricIndex is negative, one of the metricAggs was not present in the union of metrics from the indices
+        we are merging
+       */
+      if (metricIndex > -1) {
+        sortedMetricAggs[metricIndex] = metricAgg;
+      }
+    }
+
+    /*
+      If there is nothing at sortedMetricAggs[i], then we did not have a metricAgg whose name matched the name
+      of the ith element of mergedMetrics. I.e. There was a metric in the indices to merge that we did not ask for.
+     */
+    for (int i = 0; i < sortedMetricAggs.length; i++) {
+      if (sortedMetricAggs[i] == null) {
+        throw new IAE("Indices to merge contained metric[%s], but requested metrics did not", mergedMetrics.get(i));
+      }
+    }
+
+    for (int i = 0; i < mergedMetrics.size(); i++) {
+      if (!sortedMetricAggs[i].getName().equals(mergedMetrics.get(i))) {
+        throw new IAE(
+            "Metric mismatch, index[%d] [%s] != [%s]",
+            i,
+            sortedMetricAggs[i].getName(),
+            mergedMetrics.get(i)
+        );
+      }
+    }
+
+    Function<ArrayList<Iterable<Rowboat>>, Iterable<Rowboat>> rowMergerFn = new Function<ArrayList<Iterable<Rowboat>>, Iterable<Rowboat>>()
+    {
+      @Override
+      public Iterable<Rowboat> apply(
+          @Nullable ArrayList<Iterable<Rowboat>> boats
+      )
+      {
+        if (rollup) {
+          return CombiningIterable.create(
+              new MergeIterable<>(Comparators.naturalNullsFirst(), boats),
+              Comparators.naturalNullsFirst(),
+              new RowboatMergeFunction(sortedMetricAggs)
+          );
+        } else {
+          return new MergeIterable<Rowboat>(
+              new Ordering<Rowboat>()
+              {
+                @Override
+                public int compare(Rowboat left, Rowboat right)
+                {
+                  return Longs.compare(left.getTimestamp(), right.getTimestamp());
+                }
+              }.nullsFirst(),
+              boats
+          );
+        }
+      }
+    };
+
+    return makeIndexFiles(
+        indexes,
+        sortedMetricAggs,
+        outDir,
+        progress,
+        mergedDimensions,
+        mergedMetrics,
+        rowMergerFn,
+        indexSpec,
+        segmentWriteOutMediumFactory
+    );
+  }
+
+  @Override
+  public File convert(final File inDir, final File outDir, final IndexSpec indexSpec) throws IOException
+  {
+    return convert(inDir, outDir, indexSpec, new BaseProgressIndicator(), defaultSegmentWriteOutMediumFactory);
+  }
+
+  @Override
+  public File convert(
+      final File inDir,
+      final File outDir,
+      final IndexSpec indexSpec,
+      final ProgressIndicator progress,
+      final @Nullable SegmentWriteOutMediumFactory segmentWriteOutMediumFactory
+  ) throws IOException
+  {
+    try (QueryableIndex index = indexIO.loadIndex(inDir)) {
+      final IndexableAdapter adapter = new QueryableIndexIndexableAdapter(index);
+      return makeIndexFiles(
+          ImmutableList.of(adapter),
+          null,
+          outDir,
+          progress,
+          Lists.newArrayList(adapter.getDimensionNames()),
+          Lists.newArrayList(adapter.getMetricNames()),
+          new Function<ArrayList<Iterable<Rowboat>>, Iterable<Rowboat>>()
+          {
+            @Nullable
+            @Override
+            public Iterable<Rowboat> apply(ArrayList<Iterable<Rowboat>> input)
+            {
+              return input.get(0);
+            }
+          },
+          indexSpec,
+          segmentWriteOutMediumFactory
+      );
+    }
+  }
+
+  @Override
+  public File append(
+      List<IndexableAdapter> indexes,
+      AggregatorFactory[] aggregators,
+      File outDir,
+      IndexSpec indexSpec,
+      @Nullable SegmentWriteOutMediumFactory segmentWriteOutMediumFactory
+  ) throws IOException
+  {
+    FileUtils.deleteDirectory(outDir);
+    FileUtils.forceMkdir(outDir);
+
+    final List<String> mergedDimensions = IndexMerger.getMergedDimensions(indexes);
+
+    final List<String> mergedMetrics = IndexMerger.mergeIndexed(
+        Lists.transform(
+            indexes,
+            new Function<IndexableAdapter, Iterable<String>>()
+            {
+              @Override
+              public Iterable<String> apply(@Nullable IndexableAdapter input)
+              {
+                return Iterables.transform(
+                    input.getMetricNames(),
+                    new Function<String, String>()
+                    {
+                      @Override
+                      public String apply(@Nullable String input)
+                      {
+                        return input;
+                      }
+                    }
+                );
+              }
+            }
+        )
+    );
+
+    Function<ArrayList<Iterable<Rowboat>>, Iterable<Rowboat>> rowMergerFn = new Function<ArrayList<Iterable<Rowboat>>, Iterable<Rowboat>>()
+    {
+      @Override
+      public Iterable<Rowboat> apply(
+          @Nullable final ArrayList<Iterable<Rowboat>> boats
+      )
+      {
+        return new MergeIterable<>(Comparators.naturalNullsFirst(), boats);
+      }
+    };
+
+    return makeIndexFiles(
+        indexes,
+        aggregators,
+        outDir,
+        new BaseProgressIndicator(),
+        mergedDimensions,
+        mergedMetrics,
+        rowMergerFn,
+        indexSpec,
+        segmentWriteOutMediumFactory
+    );
+  }
+
+  private DimensionHandler[] makeDimensionHandlers(
+      final List<String> mergedDimensions,
+      final List<ColumnCapabilitiesImpl> dimCapabilities
+  )
+  {
+    final DimensionHandler[] handlers = new DimensionHandler[mergedDimensions.size()];
+    for (int i = 0; i < mergedDimensions.size(); i++) {
+      ColumnCapabilities capabilities = dimCapabilities.get(i);
+      String dimName = mergedDimensions.get(i);
+      handlers[i] = DimensionHandlerUtils.getHandlerFromCapabilities(dimName, capabilities, null);
+    }
+    return handlers;
+  }
+
+  private Iterable<Rowboat> makeRowIterable(
+      List<IndexableAdapter> indexes,
+      final List<String> mergedDimensions,
+      final List<String> mergedMetrics,
+      Function<ArrayList<Iterable<Rowboat>>, Iterable<Rowboat>> rowMergerFn,
+      final DimensionHandler[] handlers,
+      final List<DimensionMerger> mergers
+  )
+  {
+    ArrayList<Iterable<Rowboat>> boats = Lists.newArrayListWithCapacity(indexes.size());
+
+    for (int i = 0; i < indexes.size(); ++i) {
+      final IndexableAdapter adapter = indexes.get(i);
+
+      final int[] dimLookup = getColumnIndexReorderingMap(adapter.getDimensionNames(), mergedDimensions);
+      final int[] metricLookup = getColumnIndexReorderingMap(adapter.getMetricNames(), mergedMetrics);
+
+      Iterable<Rowboat> target = indexes.get(i).getRows();
+      if (dimLookup != null || metricLookup != null) {
+        // resize/reorder index table if needed
+        target = Iterables.transform(
+            target,
+            new Function<Rowboat, Rowboat>()
+            {
+              @Override
+              public Rowboat apply(Rowboat input)
+              {
+                Object[] newDims;
+                if (dimLookup != null) {
+                  newDims = new Object[mergedDimensions.size()];
+                  int j = 0;
+                  for (Object dim : input.getDims()) {
+                    newDims[dimLookup[j]] = dim;
+                    j++;
+                  }
+                } else {
+                  // It's possible for getColumnIndexReorderingMap to return null when
+                  // both column lists are identical. Copy the old array, no dimension reordering is needed.
+                  newDims = input.getDims();
+                }
+
+                Object[] newMetrics = input.getMetrics();
+                if (metricLookup != null) {
+                  newMetrics = new Object[mergedMetrics.size()];
+                  int j = 0;
+                  for (Object met : input.getMetrics()) {
+                    newMetrics[metricLookup[j]] = met;
+                    j++;
+                  }
+                }
+
+                return new Rowboat(
+                    input.getTimestamp(),
+                    newDims,
+                    newMetrics,
+                    input.getRowNum(),
+                    handlers
+                );
+              }
+            }
+        );
+      }
+      boats.add(
+          new MMappedIndexRowIterable(
+              target, mergedDimensions, i, mergers
+          )
+      );
+    }
+
+    return rowMergerFn.apply(boats);
+  }
+
+  // If an adapter's column list differs from the merged column list across multiple indexes,
+  // return an array that maps the adapter's column orderings to the larger, merged column ordering
+  private int[] getColumnIndexReorderingMap(Indexed<String> adapterColumnNames, List<String> mergedColumnNames)
+  {
+    if (isSame(adapterColumnNames, mergedColumnNames)) {
+      return null;  // no need to convert if column lists are identical
+    }
+    int[] dimLookup = new int[mergedColumnNames.size()];
+    for (int i = 0; i < adapterColumnNames.size(); i++) {
+      dimLookup[i] = mergedColumnNames.indexOf(adapterColumnNames.get(i));
+    }
+    return dimLookup;
+  }
+
+  private boolean isSame(Indexed<String> indexed, List<String> values)
+  {
+    if (indexed.size() != values.size()) {
+      return false;
+    }
+    for (int i = 0; i < indexed.size(); i++) {
+      if (!indexed.get(i).equals(values.get(i))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
 }

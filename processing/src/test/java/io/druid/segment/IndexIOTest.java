@@ -27,20 +27,20 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.metamx.common.UOE;
 import io.druid.data.input.MapBasedInputRow;
 import io.druid.data.input.impl.DimensionsSpec;
-import io.druid.granularity.QueryGranularity;
+import io.druid.java.util.common.Intervals;
+import io.druid.java.util.common.UOE;
+import io.druid.segment.writeout.OffHeapMemorySegmentWriteOutMediumFactory;
 import io.druid.query.aggregation.Aggregator;
-import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.CountAggregatorFactory;
-import io.druid.segment.data.CompressedObjectStrategy;
+import io.druid.segment.data.CompressionFactory;
+import io.druid.segment.data.CompressionStrategy;
 import io.druid.segment.data.ConciseBitmapSerdeFactory;
 import io.druid.segment.incremental.IncrementalIndex;
 import io.druid.segment.incremental.IncrementalIndexAdapter;
 import io.druid.segment.incremental.IncrementalIndexSchema;
 import io.druid.segment.incremental.IndexSizeExceededException;
-import io.druid.segment.incremental.OnheapIncrementalIndex;
 import org.joda.time.Interval;
 import org.junit.Assert;
 import org.junit.Before;
@@ -64,11 +64,12 @@ import java.util.Map;
 @RunWith(Parameterized.class)
 public class IndexIOTest
 {
-  private static Interval DEFAULT_INTERVAL = Interval.parse("1970-01-01/2000-01-01");
-  private static final IndexSpec INDEX_SPEC = IndexMergerTest.makeIndexSpec(
+  private static Interval DEFAULT_INTERVAL = Intervals.of("1970-01-01/2000-01-01");
+  private static final IndexSpec INDEX_SPEC = IndexMergerTestBase.makeIndexSpec(
       new ConciseBitmapSerdeFactory(),
-      CompressedObjectStrategy.CompressionStrategy.LZ4,
-      CompressedObjectStrategy.CompressionStrategy.LZ4
+      CompressionStrategy.LZ4,
+      CompressionStrategy.LZ4,
+      CompressionFactory.LongEncodingStrategy.LONGS
   );
 
   private static <T> List<T> filterByBitset(List<T> list, BitSet bitSet)
@@ -203,9 +204,8 @@ public class IndexIOTest
                             return new Object[]{
                                 maplist1,
                                 maplist2,
-                                filterNullValues(maplist1).equals(filterNullValues(maplist2))
-                                ? null
-                                : SegmentValidationException.class
+                                filterNullValues(maplist1).equals(filterNullValues(maplist2)) ?
+                                    null : SegmentValidationException.class
                             };
                           }
 
@@ -261,49 +261,39 @@ public class IndexIOTest
     this.exception = exception;
   }
 
-  final IncrementalIndex<Aggregator> incrementalIndex1 = new OnheapIncrementalIndex(
-      new IncrementalIndexSchema.Builder().withMinTimestamp(DEFAULT_INTERVAL.getStart().getMillis())
-                                          .withQueryGranularity(QueryGranularity.NONE)
-                                          .withMetrics(
-                                              new AggregatorFactory[]{
-                                                  new CountAggregatorFactory(
-                                                      "count"
-                                                  )
-                                              }
-                                          )
-                                          .withDimensionsSpec(
-                                              new DimensionsSpec(
-                                                  Arrays.asList("dim0", "dim1"),
-                                                  null,
-                                                  null
-                                              )
-                                          )
-                                          .build(),
-      true,
-      1000000
-  );
+  final IncrementalIndex<Aggregator> incrementalIndex1 = new IncrementalIndex.Builder()
+      .setIndexSchema(
+          new IncrementalIndexSchema.Builder()
+              .withMinTimestamp(DEFAULT_INTERVAL.getStart().getMillis())
+              .withMetrics(new CountAggregatorFactory("count"))
+              .withDimensionsSpec(
+                  new DimensionsSpec(
+                      DimensionsSpec.getDefaultSchemas(Arrays.asList("dim0", "dim1")),
+                      null,
+                      null
+                  )
+              )
+              .build()
+      )
+      .setMaxRowCount(1000000)
+      .buildOnheap();
 
-  final IncrementalIndex<Aggregator> incrementalIndex2 = new OnheapIncrementalIndex(
-      new IncrementalIndexSchema.Builder().withMinTimestamp(DEFAULT_INTERVAL.getStart().getMillis())
-                                          .withQueryGranularity(QueryGranularity.NONE)
-                                          .withMetrics(
-                                              new AggregatorFactory[]{
-                                                  new CountAggregatorFactory(
-                                                      "count"
-                                                  )
-                                              }
-                                          )
-                                          .withDimensionsSpec(
-                                              new DimensionsSpec(
-                                                  Arrays.asList("dim0", "dim1"),
-                                                  null,
-                                                  null
-                                              )
-                                          )
-                                          .build(),
-      true,
-      1000000
-  );
+  final IncrementalIndex<Aggregator> incrementalIndex2 = new IncrementalIndex.Builder()
+      .setIndexSchema(
+          new IncrementalIndexSchema.Builder()
+              .withMinTimestamp(DEFAULT_INTERVAL.getStart().getMillis())
+              .withMetrics(new CountAggregatorFactory("count"))
+              .withDimensionsSpec(
+                  new DimensionsSpec(
+                      DimensionsSpec.getDefaultSchemas(Arrays.asList("dim0", "dim1")),
+                      null,
+                      null
+                  )
+              )
+              .build()
+      )
+      .setMaxRowCount(1000000)
+      .buildOnheap();
 
   IndexableAdapter adapter1;
   IndexableAdapter adapter2;
@@ -339,7 +329,7 @@ public class IndexIOTest
   {
     Exception ex = null;
     try {
-      TestHelper.getTestIndexIO().validateTwoSegments(adapter1, adapter2);
+      TestHelper.getTestIndexIO(OffHeapMemorySegmentWriteOutMediumFactory.instance()).validateTwoSegments(adapter1, adapter2);
     }
     catch (Exception e) {
       ex = e;

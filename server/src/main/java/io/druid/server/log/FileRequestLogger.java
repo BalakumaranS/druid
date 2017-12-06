@@ -22,16 +22,20 @@ package io.druid.server.log;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Charsets;
 import com.google.common.base.Throwables;
-import com.metamx.common.concurrent.ScheduledExecutors;
-import com.metamx.common.guava.CloseQuietly;
-import com.metamx.common.lifecycle.LifecycleStart;
-import com.metamx.common.lifecycle.LifecycleStop;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.StringUtils;
+import io.druid.java.util.common.concurrent.ScheduledExecutors;
+import io.druid.java.util.common.guava.CloseQuietly;
+import io.druid.java.util.common.lifecycle.LifecycleStart;
+import io.druid.java.util.common.lifecycle.LifecycleStop;
 import io.druid.server.RequestLogLine;
 import org.joda.time.DateTime;
 import org.joda.time.Duration;
 import org.joda.time.MutableDateTime;
+import org.joda.time.chrono.ISOChronology;
 
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
@@ -48,8 +52,8 @@ public class FileRequestLogger implements RequestLogger
 
   private final Object lock = new Object();
 
-  private volatile DateTime currentDay;
-  private volatile OutputStreamWriter fileWriter;
+  private DateTime currentDay;
+  private OutputStreamWriter fileWriter;
 
   public FileRequestLogger(ObjectMapper objectMapper, ScheduledExecutorService exec, File baseDir)
   {
@@ -64,35 +68,30 @@ public class FileRequestLogger implements RequestLogger
     try {
       baseDir.mkdirs();
 
-      MutableDateTime mutableDateTime = new DateTime().toMutableDateTime();
+      MutableDateTime mutableDateTime = DateTimes.nowUtc().toMutableDateTime(ISOChronology.getInstanceUTC());
       mutableDateTime.setMillisOfDay(0);
-      currentDay = mutableDateTime.toDateTime();
+      synchronized (lock) {
+        currentDay = mutableDateTime.toDateTime(ISOChronology.getInstanceUTC());
 
-      fileWriter = new OutputStreamWriter(
-          new FileOutputStream(new File(baseDir, currentDay.toString("yyyy-MM-dd'.log'")), true),
-          Charsets.UTF_8
-      );
+        fileWriter = getFileWriter();
+      }
       long nextDay = currentDay.plusDays(1).getMillis();
-      Duration delay = new Duration(nextDay - new DateTime().getMillis());
+      Duration initialDelay = new Duration(nextDay - System.currentTimeMillis());
 
       ScheduledExecutors.scheduleWithFixedDelay(
           exec,
-          delay,
+          initialDelay,
           Duration.standardDays(1),
           new Callable<ScheduledExecutors.Signal>()
           {
             @Override
             public ScheduledExecutors.Signal call()
             {
-              currentDay = currentDay.plusDays(1);
-
               try {
                 synchronized (lock) {
+                  currentDay = currentDay.plusDays(1);
                   CloseQuietly.close(fileWriter);
-                  fileWriter = new OutputStreamWriter(
-                      new FileOutputStream(new File(baseDir, currentDay.toString()), true),
-                      Charsets.UTF_8
-                  );
+                  fileWriter = getFileWriter();
                 }
               }
               catch (Exception e) {
@@ -109,6 +108,14 @@ public class FileRequestLogger implements RequestLogger
     }
   }
 
+  private OutputStreamWriter getFileWriter() throws FileNotFoundException
+  {
+    return new OutputStreamWriter(
+        new FileOutputStream(new File(baseDir, currentDay.toString("yyyy-MM-dd'.log'")), true),
+        Charsets.UTF_8
+    );
+  }
+
   @LifecycleStop
   public void stop()
   {
@@ -122,9 +129,17 @@ public class FileRequestLogger implements RequestLogger
   {
     synchronized (lock) {
       fileWriter.write(
-          String.format("%s%n", requestLogLine.getLine(objectMapper))
+          StringUtils.format("%s%n", requestLogLine.getLine(objectMapper))
       );
       fileWriter.flush();
     }
+  }
+
+  @Override
+  public String toString()
+  {
+    return "FileRequestLogger{" +
+           "baseDir=" + baseDir +
+           '}';
   }
 }

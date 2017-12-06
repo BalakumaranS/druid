@@ -19,23 +19,27 @@
 
 package io.druid.query.select;
 
-import com.metamx.common.guava.nary.BinaryFn;
-import io.druid.granularity.AllGranularity;
-import io.druid.granularity.QueryGranularity;
+import com.google.common.collect.Sets;
+import io.druid.java.util.common.granularity.AllGranularity;
+import io.druid.java.util.common.granularity.Granularity;
+import io.druid.java.util.common.guava.nary.BinaryFn;
 import io.druid.query.Result;
 import org.joda.time.DateTime;
+
+import java.util.List;
+import java.util.Set;
 
 /**
  */
 public class SelectBinaryFn
     implements BinaryFn<Result<SelectResultValue>, Result<SelectResultValue>, Result<SelectResultValue>>
 {
-  private final QueryGranularity gran;
+  private final Granularity gran;
   private final PagingSpec pagingSpec;
   private final boolean descending;
 
   public SelectBinaryFn(
-      QueryGranularity granularity,
+      Granularity granularity,
       PagingSpec pagingSpec,
       boolean descending
   )
@@ -58,14 +62,25 @@ public class SelectBinaryFn
       return arg1;
     }
 
+    final List<EventHolder> arg1Val = arg1.getValue().getEvents();
+    final List<EventHolder> arg2Val = arg2.getValue().getEvents();
+
+    if (arg1Val == null || arg1Val.isEmpty()) {
+      return arg2;
+    }
+
+    if (arg2Val == null || arg2Val.isEmpty()) {
+      return arg1;
+    }
+
     final DateTime timestamp = (gran instanceof AllGranularity)
                                ? arg1.getTimestamp()
-                               : gran.toDateTime(gran.truncate(arg1.getTimestamp().getMillis()));
+                               : gran.bucketStart(arg1.getTimestamp());
 
-    SelectResultValueBuilder builder = new SelectResultValueBuilder(timestamp, pagingSpec, descending);
+    SelectResultValueBuilder builder = new SelectResultValueBuilder.MergeBuilder(timestamp, pagingSpec, descending);
 
-    SelectResultValue arg1Val = arg1.getValue();
-    SelectResultValue arg2Val = arg2.getValue();
+    builder.addDimensions(mergeColumns(arg1.getValue().getDimensions(), arg2.getValue().getDimensions()));
+    builder.addMetrics(mergeColumns(arg1.getValue().getMetrics(), arg2.getValue().getMetrics()));
 
     for (EventHolder event : arg1Val) {
       builder.addEntry(event);
@@ -76,5 +91,22 @@ public class SelectBinaryFn
     }
 
     return builder.build();
+  }
+
+  private Set<String> mergeColumns(final Set<String> arg1, final Set<String> arg2)
+  {
+    if (arg1.isEmpty()) {
+      return arg2;
+    }
+
+    if (arg2.isEmpty()) {
+      return arg1;
+    }
+
+    if (arg1.equals(arg2)) {
+      return arg1;
+    }
+
+    return Sets.union(arg1, arg2);
   }
 }

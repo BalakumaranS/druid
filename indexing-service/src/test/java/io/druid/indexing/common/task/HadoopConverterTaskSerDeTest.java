@@ -23,7 +23,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.druid.indexing.common.TestUtils;
+import io.druid.java.util.common.Intervals;
 import io.druid.segment.IndexSpec;
+import io.druid.segment.data.CompressionFactory;
+import io.druid.segment.data.CompressionStrategy;
 import io.druid.segment.data.ConciseBitmapSerdeFactory;
 import io.druid.timeline.DataSegment;
 import io.druid.timeline.partition.NoneShardSpec;
@@ -42,15 +45,18 @@ public class HadoopConverterTaskSerDeTest
 
   private static final String TASK_ID = "task id";
   private static final String DATA_SOURCE = "datasource";
-  private static final Interval INTERVAL = Interval.parse("2010/2011");
+  private static final Interval INTERVAL = Intervals.of("2010/2011");
   private static final String SEGMENT_VERSION = "some version";
   private static final Map<String, Object> LOAD_SPEC = ImmutableMap.<String, Object>of("someKey", "someVal");
   private static final List<String> DIMENSIONS = ImmutableList.of("dim1", "dim2");
   private static final List<String> METRICS = ImmutableList.of("metric1", "metric2");
-  private static final ShardSpec SHARD_SPEC = new NoneShardSpec();
+  private static final ShardSpec SHARD_SPEC = NoneShardSpec.instance();
   private static final int BINARY_VERSION = 34718;
   private static final long SEGMENT_SIZE = 7483901348790L;
-  private static final IndexSpec INDEX_SPEC = new IndexSpec(new ConciseBitmapSerdeFactory(), "lz4", "lzf");
+  private static final IndexSpec INDEX_SPEC = new IndexSpec(new ConciseBitmapSerdeFactory(),
+                                                            CompressionStrategy.LZ4,
+                                                            CompressionStrategy.LZF,
+                                                            CompressionFactory.LongEncodingStrategy.LONGS);
   private static final DataSegment DATA_SEGMENT = new DataSegment(
       DATA_SOURCE,
       INTERVAL,
@@ -91,6 +97,7 @@ public class HadoopConverterTaskSerDeTest
         PRIORITY,
         OUTPUT_PATH,
         CLASSPATH_PREFIX,
+        null,
         null
     );
     final String strOrig = jsonMapper.writeValueAsString(orig);
@@ -116,6 +123,7 @@ public class HadoopConverterTaskSerDeTest
         PRIORITY,
         OUTPUT_PATH,
         CLASSPATH_PREFIX,
+        null,
         null
     );
     HadoopConverterTask.ConverterSubTask subTask = new HadoopConverterTask.ConverterSubTask(
@@ -169,6 +177,7 @@ public class HadoopConverterTaskSerDeTest
         PRIORITY,
         OUTPUT_PATH,
         CLASSPATH_PREFIX,
+        null,
         null
     );
     HadoopConverterTask.ConverterSubTask subTask = new HadoopConverterTask.ConverterSubTask(
@@ -197,6 +206,7 @@ public class HadoopConverterTaskSerDeTest
         PRIORITY,
         OUTPUT_PATH,
         CLASSPATH_PREFIX,
+        null,
         null
     );
     Assert.assertTrue(orig.isValidate());
@@ -216,6 +226,7 @@ public class HadoopConverterTaskSerDeTest
         DISTRIBUTED_CACHE,
         null,
         OUTPUT_PATH,
+        null,
         null,
         null
     );
@@ -242,6 +253,7 @@ public class HadoopConverterTaskSerDeTest
         PRIORITY,
         OUTPUT_PATH,
         CLASSPATH_PREFIX,
+        null,
         null
     );
     orig.getSegment();
@@ -262,6 +274,7 @@ public class HadoopConverterTaskSerDeTest
         null,
         OUTPUT_PATH,
         null,
+        null,
         null
     );
   }
@@ -280,6 +293,7 @@ public class HadoopConverterTaskSerDeTest
         DISTRIBUTED_CACHE,
         null,
         OUTPUT_PATH,
+        null,
         null,
         null
     );
@@ -300,6 +314,7 @@ public class HadoopConverterTaskSerDeTest
         null,
         OUTPUT_PATH,
         null,
+        null,
         null
     );
   }
@@ -316,6 +331,7 @@ public class HadoopConverterTaskSerDeTest
         null,
         null,
         DISTRIBUTED_CACHE,
+        null,
         null,
         null,
         null,

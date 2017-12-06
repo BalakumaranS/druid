@@ -29,6 +29,8 @@ import io.druid.data.input.FirehoseFactory;
 import io.druid.data.input.InputRow;
 import io.druid.data.input.impl.InputRowParser;
 
+import javax.annotation.Nullable;
+import java.io.File;
 import java.io.IOException;
 import java.util.Iterator;
 import java.util.List;
@@ -52,9 +54,9 @@ public class CombiningFirehoseFactory implements FirehoseFactory<InputRowParser>
   }
 
   @Override
-  public Firehose connect(InputRowParser parser) throws IOException
+  public Firehose connect(InputRowParser parser, File temporaryDirectory) throws IOException
   {
-    return new CombiningFirehose(parser);
+    return new CombiningFirehose(parser, temporaryDirectory);
   }
 
   @JsonProperty("delegates")
@@ -63,16 +65,18 @@ public class CombiningFirehoseFactory implements FirehoseFactory<InputRowParser>
     return delegateFactoryList;
   }
 
-  public class CombiningFirehose implements Firehose
+  class CombiningFirehose implements Firehose
   {
     private final InputRowParser parser;
+    private final File temporaryDirectory;
     private final Iterator<FirehoseFactory> firehoseFactoryIterator;
     private volatile Firehose currentFirehose;
 
-    public CombiningFirehose(InputRowParser parser) throws IOException
+    CombiningFirehose(InputRowParser parser, File temporaryDirectory) throws IOException
     {
       this.firehoseFactoryIterator = delegateFactoryList.iterator();
       this.parser = parser;
+      this.temporaryDirectory = temporaryDirectory;
       nextFirehose();
     }
 
@@ -84,7 +88,7 @@ public class CombiningFirehoseFactory implements FirehoseFactory<InputRowParser>
             currentFirehose.close();
           }
 
-          currentFirehose = firehoseFactoryIterator.next().connect(parser);
+          currentFirehose = firehoseFactoryIterator.next().connect(parser, temporaryDirectory);
         }
         catch (IOException e) {
           if (currentFirehose != null) {
@@ -107,6 +111,7 @@ public class CombiningFirehoseFactory implements FirehoseFactory<InputRowParser>
       return currentFirehose.hasMore();
     }
 
+    @Nullable
     @Override
     public InputRow nextRow()
     {

@@ -19,12 +19,12 @@
 
 package io.druid.server.metrics;
 
-import com.metamx.common.ISE;
-import com.metamx.common.logger.Logger;
-
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+
+import io.druid.java.util.common.ISE;
+import io.druid.java.util.common.logger.Logger;
 
 public class EventReceiverFirehoseRegister
 {
@@ -50,7 +50,7 @@ public class EventReceiverFirehoseRegister
   {
     log.info("Unregistering EventReceiverFirehoseMetric for service [%s]", serviceName);
     if (metrics.remove(serviceName) == null) {
-      log.warn("Unregistering a non-exist service. Service [%s] never exists.");
+      log.warn("Unregistering a non-exist service. Service [%s] never exists.", serviceName);
     }
   }
 }

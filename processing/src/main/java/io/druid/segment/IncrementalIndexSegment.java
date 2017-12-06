@@ -27,7 +27,7 @@ import java.io.IOException;
 
 /**
  */
-public class IncrementalIndexSegment implements Segment
+public class IncrementalIndexSegment extends AbstractSegment
 {
   private final IncrementalIndex index;
   private final String segmentIdentifier;

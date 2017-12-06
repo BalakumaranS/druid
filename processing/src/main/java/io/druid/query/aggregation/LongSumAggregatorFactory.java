@@ -19,53 +19,79 @@
 
 package io.druid.query.aggregation;
 
+import com.fasterxml.jackson.annotation.JacksonInject;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
 import com.google.common.primitives.Longs;
-import com.metamx.common.StringUtils;
+import io.druid.java.util.common.StringUtils;
+import io.druid.math.expr.ExprMacroTable;
+import io.druid.math.expr.Parser;
+import io.druid.segment.BaseLongColumnValueSelector;
 import io.druid.segment.ColumnSelectorFactory;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 
 /**
  */
 public class LongSumAggregatorFactory extends AggregatorFactory
 {
-  private static final byte CACHE_TYPE_ID = 0x1;
-
-  private final String fieldName;
   private final String name;
+  private final String fieldName;
+  private final String expression;
+  private final ExprMacroTable macroTable;
 
   @JsonCreator
   public LongSumAggregatorFactory(
       @JsonProperty("name") String name,
-      @JsonProperty("fieldName") final String fieldName
+      @JsonProperty("fieldName") String fieldName,
+      @JsonProperty("expression") String expression,
+      @JacksonInject ExprMacroTable macroTable
   )
   {
     Preconditions.checkNotNull(name, "Must have a valid, non-null aggregator name");
-    Preconditions.checkNotNull(fieldName, "Must have a valid, non-null fieldName");
+    Preconditions.checkArgument(
+        fieldName == null ^ expression == null,
+        "Must have a valid, non-null fieldName or expression"
+    );
 
     this.name = name;
     this.fieldName = fieldName;
+    this.expression = expression;
+    this.macroTable = macroTable;
+  }
+
+  public LongSumAggregatorFactory(String name, String fieldName)
+  {
+    this(name, fieldName, null, ExprMacroTable.nil());
   }
 
   @Override
   public Aggregator factorize(ColumnSelectorFactory metricFactory)
   {
-    return new LongSumAggregator(
-        name,
-        metricFactory.makeLongColumnSelector(fieldName)
-    );
+    return new LongSumAggregator(getLongColumnSelector(metricFactory));
   }
 
   @Override
   public BufferAggregator factorizeBuffered(ColumnSelectorFactory metricFactory)
   {
-    return new LongSumBufferAggregator(metricFactory.makeLongColumnSelector(fieldName));
+    return new LongSumBufferAggregator(getLongColumnSelector(metricFactory));
+  }
+
+  private BaseLongColumnValueSelector getLongColumnSelector(ColumnSelectorFactory metricFactory)
+  {
+    return AggregatorUtil.makeColumnValueSelectorWithLongDefault(
+        metricFactory,
+        macroTable,
+        fieldName,
+        expression,
+        0L
+    );
   }
 
   @Override
@@ -81,9 +107,15 @@ public class LongSumAggregatorFactory extends AggregatorFactory
   }
 
   @Override
+  public AggregateCombiner makeAggregateCombiner()
+  {
+    return new LongSumAggregateCombiner();
+  }
+
+  @Override
   public AggregatorFactory getCombiningFactory()
   {
-    return new LongSumAggregatorFactory(name, name);
+    return new LongSumAggregatorFactory(name, name, null, macroTable);
   }
 
   @Override
@@ -99,7 +131,7 @@ public class LongSumAggregatorFactory extends AggregatorFactory
   @Override
   public List<AggregatorFactory> getRequiredColumns()
   {
-    return Arrays.<AggregatorFactory>asList(new LongSumAggregatorFactory(fieldName, fieldName));
+    return Arrays.<AggregatorFactory>asList(new LongSumAggregatorFactory(fieldName, fieldName, expression, macroTable));
   }
 
   @Override
@@ -120,6 +152,12 @@ public class LongSumAggregatorFactory extends AggregatorFactory
     return fieldName;
   }
 
+  @JsonProperty
+  public String getExpression()
+  {
+    return expression;
+  }
+
   @Override
   @JsonProperty
   public String getName()
@@ -130,15 +168,23 @@ public class LongSumAggregatorFactory extends AggregatorFactory
   @Override
   public List<String> requiredFields()
   {
-    return Arrays.asList(fieldName);
+    return fieldName != null
+           ? Collections.singletonList(fieldName)
+           : Parser.findRequiredBindings(Parser.parse(expression, macroTable));
   }
 
   @Override
   public byte[] getCacheKey()
   {
-    byte[] fieldNameBytes = StringUtils.toUtf8(fieldName);
+    byte[] fieldNameBytes = StringUtils.toUtf8WithNullToEmpty(fieldName);
+    byte[] expressionBytes = StringUtils.toUtf8WithNullToEmpty(expression);
 
-    return ByteBuffer.allocate(1 + fieldNameBytes.length).put(CACHE_TYPE_ID).put(fieldNameBytes).array();
+    return ByteBuffer.allocate(2 + fieldNameBytes.length + expressionBytes.length)
+                     .put(AggregatorUtil.LONG_SUM_CACHE_TYPE_ID)
+                     .put(fieldNameBytes)
+                     .put(AggregatorUtil.STRING_SEPARATOR)
+                     .put(expressionBytes)
+                     .array();
   }
 
   @Override
@@ -154,16 +200,11 @@ public class LongSumAggregatorFactory extends AggregatorFactory
   }
 
   @Override
-  public Object getAggregatorStartValue()
-  {
-    return 0;
-  }
-
-  @Override
   public String toString()
   {
     return "LongSumAggregatorFactory{" +
            "fieldName='" + fieldName + '\'' +
+           ", expression='" + expression + '\'' +
            ", name='" + name + '\'' +
            '}';
   }
@@ -180,10 +221,13 @@ public class LongSumAggregatorFactory extends AggregatorFactory
 
     LongSumAggregatorFactory that = (LongSumAggregatorFactory) o;
 
-    if (fieldName != null ? !fieldName.equals(that.fieldName) : that.fieldName != null) {
+    if (!Objects.equals(fieldName, that.fieldName)) {
       return false;
     }
-    if (name != null ? !name.equals(that.name) : that.name != null) {
+    if (!Objects.equals(expression, that.expression)) {
+      return false;
+    }
+    if (!Objects.equals(name, that.name)) {
       return false;
     }
 
@@ -194,6 +238,7 @@ public class LongSumAggregatorFactory extends AggregatorFactory
   public int hashCode()
   {
     int result = fieldName != null ? fieldName.hashCode() : 0;
+    result = 31 * result + (expression != null ? expression.hashCode() : 0);
     result = 31 * result + (name != null ? name.hashCode() : 0);
     return result;
   }

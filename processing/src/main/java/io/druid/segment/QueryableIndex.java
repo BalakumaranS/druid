@@ -19,28 +19,35 @@
 
 package io.druid.segment;
 
-import com.metamx.collections.bitmap.BitmapFactory;
+import io.druid.collections.bitmap.BitmapFactory;
 import io.druid.segment.data.Indexed;
 import org.joda.time.Interval;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.Map;
 
 /**
+ * Direct interface to memory mapped segments. Not a public API for extensions; site specific queries should be
+ * using {@link StorageAdapter}.
+ *
+ * @see QueryableIndexStorageAdapter for query path adapter
+ * @see QueryableIndexIndexableAdapter for indexing path adapter
  */
 public interface QueryableIndex extends ColumnSelector, Closeable
 {
-  public Interval getDataInterval();
-  public int getNumRows();
-  public Indexed<String> getColumnNames();
-  public Indexed<String> getAvailableDimensions();
-  public BitmapFactory getBitmapFactoryForDimensions();
-  public Metadata getMetadata();
+  Interval getDataInterval();
+  int getNumRows();
+  Indexed<String> getAvailableDimensions();
+  BitmapFactory getBitmapFactoryForDimensions();
+  Metadata getMetadata();
+  Map<String, DimensionHandler> getDimensionHandlers();
 
   /**
    * The close method shouldn't actually be here as this is nasty. We will adjust it in the future.
-   * @throws java.io.IOException if an exception was thrown closing the index
+   * @throws IOException if an exception was thrown closing the index
    */
   //@Deprecated // This is still required for SimpleQueryableIndex. It should not go away unitl SimpleQueryableIndex is fixed
-  public void close() throws IOException;
+  @Override
+  void close() throws IOException;
 }

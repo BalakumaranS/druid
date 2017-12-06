@@ -20,15 +20,17 @@
 package io.druid.indexer;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.metamx.common.IAE;
+import com.google.common.collect.ImmutableList;
 import io.druid.data.input.InputRow;
 import io.druid.data.input.impl.InputRowParser;
 import io.druid.data.input.impl.ParseSpec;
 import io.druid.data.input.impl.StringInputRowParser;
+import io.druid.java.util.common.IAE;
 import org.apache.hadoop.io.BytesWritable;
 import org.apache.hadoop.io.Text;
 
 import java.nio.ByteBuffer;
+import java.util.List;
 
 /**
  */
@@ -38,17 +40,17 @@ public class HadoopyStringInputRowParser implements InputRowParser<Object>
 
   public HadoopyStringInputRowParser(@JsonProperty("parseSpec") ParseSpec parseSpec)
   {
-    this.parser = new StringInputRowParser(parseSpec);
+    this.parser = new StringInputRowParser(parseSpec, null);
   }
 
   @Override
-  public InputRow parse(Object input)
+  public List<InputRow> parseBatch(Object input)
   {
     if (input instanceof Text) {
-      return parser.parse(((Text) input).toString());
+      return ImmutableList.of(parser.parse(((Text) input).toString()));
     } else if (input instanceof BytesWritable) {
       BytesWritable valueBytes = (BytesWritable) input;
-      return parser.parse(ByteBuffer.wrap(valueBytes.getBytes(), 0, valueBytes.getLength()));
+      return parser.parseBatch(ByteBuffer.wrap(valueBytes.getBytes(), 0, valueBytes.getLength()));
     } else {
       throw new IAE("can't convert type [%s] to InputRow", input.getClass().getName());
     }

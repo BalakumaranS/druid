@@ -23,9 +23,11 @@ import com.google.inject.Binder;
 import com.google.inject.Guice;
 import com.google.inject.Injector;
 import com.google.inject.Module;
-import com.metamx.common.lifecycle.Lifecycle;
-import com.metamx.common.lifecycle.LifecycleStart;
-import com.metamx.common.lifecycle.LifecycleStop;
+
+import io.druid.java.util.common.lifecycle.Lifecycle;
+import io.druid.java.util.common.lifecycle.LifecycleStart;
+import io.druid.java.util.common.lifecycle.LifecycleStop;
+
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -158,12 +160,12 @@ public class LifecycleScopeTest
     Assert.assertEquals(2, instance.getRan());
   }
 
-  private static interface TestInterface
+  private interface TestInterface
   {
-    public void run();
-    public int getStarted();
-    public int getStopped();
-    public int getRan();
+    void run();
+    int getStarted();
+    int getStopped();
+    int getRan();
   }
 
   @ManageLifecycle
@@ -191,16 +193,19 @@ public class LifecycleScopeTest
       ++ran;
     }
 
+    @Override
     public int getStarted()
     {
       return started;
     }
 
+    @Override
     public int getStopped()
     {
       return stopped;
     }
 
+    @Override
     public int getRan()
     {
       return ran;
@@ -231,16 +236,19 @@ public class LifecycleScopeTest
       ++ran;
     }
 
+    @Override
     public int getStarted()
     {
       return started;
     }
 
+    @Override
     public int getStopped()
     {
       return stopped;
     }
 
+    @Override
     public int getRan()
     {
       return ran;

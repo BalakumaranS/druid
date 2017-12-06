@@ -23,18 +23,18 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
 import io.druid.data.input.Row;
+import io.druid.query.aggregation.AggregatorFactory;
+import io.druid.segment.column.ValueType;
 
-import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.Map;
 
 /**
  * The logical "and" operator for the "having" clause.
  */
-public class AndHavingSpec implements HavingSpec
+public class AndHavingSpec extends BaseHavingSpec
 {
-  private static final byte CACHE_KEY = 0x2;
-
-  private List<HavingSpec> havingSpecs;
+  private final List<HavingSpec> havingSpecs;
 
   @JsonCreator
   public AndHavingSpec(@JsonProperty("havingSpecs") List<HavingSpec> havingSpecs)
@@ -49,6 +49,22 @@ public class AndHavingSpec implements HavingSpec
   }
 
   @Override
+  public void setRowSignature(Map<String, ValueType> rowSignature)
+  {
+    for (HavingSpec havingSpec : havingSpecs) {
+      havingSpec.setRowSignature(rowSignature);
+    }
+  }
+
+  @Override
+  public void setAggregators(Map<String, AggregatorFactory> aggregators)
+  {
+    for (HavingSpec havingSpec : havingSpecs) {
+      havingSpec.setAggregators(aggregators);
+    }
+  }
+
+  @Override
   public boolean eval(Row row)
   {
     for (HavingSpec havingSpec : havingSpecs) {
@@ -58,25 +74,6 @@ public class AndHavingSpec implements HavingSpec
     }
 
     return true;
-  }
-
-  @Override
-  public byte[] getCacheKey()
-  {
-    final byte[][] havingBytes = new byte[havingSpecs.size()][];
-    int havingBytesSize = 0;
-    int index = 0;
-    for (HavingSpec havingSpec : havingSpecs) {
-      havingBytes[index] = havingSpec.getCacheKey();
-      havingBytesSize += havingBytes[index].length;
-      ++index;
-    }
-
-    ByteBuffer buffer = ByteBuffer.allocate(1 + havingBytesSize).put(CACHE_KEY);
-    for (byte[] havingByte : havingBytes) {
-      buffer.put(havingByte);
-    }
-    return buffer.array();
   }
 
   @Override

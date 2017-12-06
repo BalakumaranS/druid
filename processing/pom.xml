@@ -26,7 +26,7 @@
     <parent>
         <groupId>io.druid</groupId>
         <artifactId>druid</artifactId>
-        <version>0.9.0-SNAPSHOT</version>
+        <version>0.11.1-SNAPSHOT</version>
     </parent>
 
     <dependencies>
@@ -35,13 +35,28 @@
             <artifactId>druid-common</artifactId>
             <version>${project.parent.version}</version>
         </dependency>
+      <dependency>
+        <groupId>io.druid</groupId>
+        <artifactId>java-util</artifactId>
+        <version>${project.parent.version}</version>
+      </dependency>
         <dependency>
-            <groupId>com.metamx</groupId>
+            <groupId>io.druid</groupId>
+            <artifactId>druid-hll</artifactId>
+            <version>${project.parent.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.druid</groupId>
             <artifactId>bytebuffer-collections</artifactId>
+            <version>${project.parent.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>it.unimi.dsi</groupId>
+            <artifactId>fastutil</artifactId>
         </dependency>
         <dependency>
             <groupId>com.metamx</groupId>
-            <artifactId>emitter</artifactId>
+            <artifactId>java-util</artifactId>
         </dependency>
         <dependency>
             <groupId>com.ning</groupId>
@@ -50,10 +65,6 @@
         <dependency>
             <groupId>org.skife.config</groupId>
             <artifactId>config-magic</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>com.google.protobuf</groupId>
-            <artifactId>protobuf-java</artifactId>
         </dependency>
         <dependency>
             <groupId>commons-io</groupId>
@@ -78,6 +89,18 @@
         <dependency>
             <groupId>commons-lang</groupId>
             <artifactId>commons-lang</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm-commons</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>it.unimi.dsi</groupId>
+            <artifactId>fastutil</artifactId>
         </dependency>
 
         <!-- Tests -->
@@ -110,6 +133,22 @@
 
     <build>
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>io.druid</groupId>
+                            <artifactId>druid-common</artifactId>
+                            <version>${project.parent.version}</version>
+                        </path>
+                    </annotationProcessorPaths>
+                    <annotationProcessors>
+                        <annotationProcessor>io.druid.annotations.SubclassesMustBePublicAnnotationProcessor</annotationProcessor>
+                    </annotationProcessors>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>

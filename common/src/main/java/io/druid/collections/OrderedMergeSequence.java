@@ -22,13 +22,14 @@ package io.druid.collections;
 import com.google.common.base.Function;
 import com.google.common.base.Throwables;
 import com.google.common.collect.Ordering;
-import com.metamx.common.guava.Accumulator;
-import com.metamx.common.guava.CloseQuietly;
-import com.metamx.common.guava.Sequence;
-import com.metamx.common.guava.Yielder;
-import com.metamx.common.guava.Yielders;
-import com.metamx.common.guava.YieldingAccumulator;
-import com.metamx.common.guava.YieldingAccumulators;
+import io.druid.java.util.common.io.Closer;
+import io.druid.java.util.common.guava.Accumulator;
+import io.druid.java.util.common.guava.CloseQuietly;
+import io.druid.java.util.common.guava.Sequence;
+import io.druid.java.util.common.guava.Yielder;
+import io.druid.java.util.common.guava.Yielders;
+import io.druid.java.util.common.guava.YieldingAccumulator;
+import io.druid.java.util.common.guava.YieldingAccumulators;
 
 import java.io.IOException;
 import java.util.PriorityQueue;
@@ -118,8 +119,7 @@ public class OrderedMergeSequence<T> implements Sequence<T>
                 throw Throwables.propagate(e);
               }
               return null;
-            }
-            else {
+            } else {
               yield();
             }
 
@@ -143,19 +143,16 @@ public class OrderedMergeSequence<T> implements Sequence<T>
       Yielder<T> yielder;
       if (oldDudeAtCrosswalk.isDone()) {
         yielder = pQueue.remove();
-      }
-      else if (pQueue.isEmpty()) {
+      } else if (pQueue.isEmpty()) {
         yielder = oldDudeAtCrosswalk.get();
         oldDudeAtCrosswalk = oldDudeAtCrosswalk.next(null);
-      }
-      else {
+      } else {
         Yielder<T> queueYielder = pQueue.peek();
         Yielder<T> iterYielder = oldDudeAtCrosswalk.get();
 
         if (ordering.compare(queueYielder.get(), iterYielder.get()) <= 0) {
           yielder = pQueue.remove();
-        }
-        else {
+        } else {
           yielder = oldDudeAtCrosswalk.get();
           oldDudeAtCrosswalk = oldDudeAtCrosswalk.next(null);
         }
@@ -170,8 +167,7 @@ public class OrderedMergeSequence<T> implements Sequence<T>
         catch (IOException e) {
           throw Throwables.propagate(e);
         }
-      }
-      else {
+      } else {
         pQueue.add(yielder);
       }
     }
@@ -206,9 +202,11 @@ public class OrderedMergeSequence<T> implements Sequence<T>
       @Override
       public void close() throws IOException
       {
-        while(!pQueue.isEmpty()) {
-          pQueue.remove().close();
+        Closer closer = Closer.create();
+        while (!pQueue.isEmpty()) {
+          closer.register(pQueue.remove());
         }
+        closer.close();
       }
     };
   }

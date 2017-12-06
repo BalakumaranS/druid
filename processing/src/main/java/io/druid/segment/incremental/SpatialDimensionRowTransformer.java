@@ -23,19 +23,18 @@ import com.google.common.base.Function;
 import com.google.common.base.Joiner;
 import com.google.common.base.Predicate;
 import com.google.common.base.Splitter;
-import com.google.common.base.Throwables;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import com.metamx.common.ISE;
-import com.metamx.common.parsers.ParseException;
 import io.druid.data.input.InputRow;
 import io.druid.data.input.Row;
 import io.druid.data.input.impl.SpatialDimensionSchema;
+import io.druid.java.util.common.ISE;
 import org.joda.time.DateTime;
 
-import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -126,29 +125,14 @@ public class SpatialDimensionRowTransformer implements Function<InputRow, InputR
       @Override
       public Object getRaw(String dimension)
       {
-        return row.getRaw(dimension);
+        List<String> retVal = spatialLookup.get(dimension);
+        return (retVal == null) ? row.getRaw(dimension) : retVal;
       }
 
       @Override
-      public long getLongMetric(String metric)
+      public Number getMetric(String metric)
       {
-        try {
-          return row.getLongMetric(metric);
-        }
-        catch (ParseException e) {
-          throw Throwables.propagate(e);
-        }
-      }
-
-      @Override
-      public float getFloatMetric(String metric)
-      {
-        try {
-          return row.getFloatMetric(metric);
-        }
-        catch (ParseException e) {
-          throw Throwables.propagate(e);
-        }
+        return row.getMetric(metric);
       }
 
       @Override
@@ -187,7 +171,7 @@ public class SpatialDimensionRowTransformer implements Function<InputRow, InputR
         }
 
         if (spatialDimVals.size() == spatialDim.getDims().size()) {
-          spatialLookup.put(spatialDimName, Arrays.asList(JOINER.join(spatialDimVals)));
+          spatialLookup.put(spatialDimName, Collections.singletonList(JOINER.join(spatialDimVals)));
           finalDims.add(spatialDimName);
         }
       }
@@ -223,11 +207,41 @@ public class SpatialDimensionRowTransformer implements Function<InputRow, InputR
     return true;
   }
 
-  private static Float tryParseFloat(String val) {
+  private static Float tryParseFloat(String val)
+  {
     try {
       return Float.parseFloat(val);
-    } catch (NullPointerException | NumberFormatException e) {
+    }
+    catch (NullPointerException | NumberFormatException e) {
       return null;
     }
+  }
+
+  /**
+   * Decodes encodedCoordinate.
+   *
+   * @param encodedCoordinate encoded coordinate
+   *
+   * @return decoded coordinate, or null if it could not be decoded
+   */
+  public static float[] decode(final String encodedCoordinate)
+  {
+    if (encodedCoordinate == null) {
+      return null;
+    }
+
+    final ImmutableList<String> parts = ImmutableList.copyOf(SPLITTER.split(encodedCoordinate));
+    final float[] coordinate = new float[parts.size()];
+
+    for (int i = 0; i < coordinate.length; i++) {
+      final Float floatPart = tryParseFloat(parts.get(i));
+      if (floatPart == null) {
+        return null;
+      } else {
+        coordinate[i] = floatPart;
+      }
+    }
+
+    return coordinate;
   }
 }

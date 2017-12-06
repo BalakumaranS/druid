@@ -20,7 +20,9 @@
 package io.druid.server.coordinator.helper;
 
 import com.google.common.collect.Lists;
+import com.metamx.common.guava.Comparators;
 import com.metamx.emitter.EmittingLogger;
+import io.druid.java.util.common.DateTimes;
 import io.druid.metadata.MetadataRuleManager;
 import io.druid.server.coordinator.CoordinatorStats;
 import io.druid.server.coordinator.DruidCluster;
@@ -29,9 +31,15 @@ import io.druid.server.coordinator.DruidCoordinatorRuntimeParams;
 import io.druid.server.coordinator.ReplicationThrottler;
 import io.druid.server.coordinator.rules.Rule;
 import io.druid.timeline.DataSegment;
+import io.druid.timeline.TimelineObjectHolder;
+import io.druid.timeline.VersionedIntervalTimeline;
 import org.joda.time.DateTime;
 
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  */
@@ -77,17 +85,49 @@ public class DruidCoordinatorRuleRunner implements DruidCoordinatorHelper
       return params;
     }
 
-    for (String tier : cluster.getTierNames()) {
-      replicatorThrottler.updateReplicationState(tier);
-      replicatorThrottler.updateTerminationState(tier);
+    // find available segments which are not overshadowed by other segments in DB
+    // only those would need to be loaded/dropped
+    // anything overshadowed by served segments is dropped automatically by DruidCoordinatorCleanupOvershadowed
+    Map<String, VersionedIntervalTimeline<String, DataSegment>> timelines = new HashMap<>();
+    for (DataSegment segment : params.getAvailableSegments()) {
+      VersionedIntervalTimeline<String, DataSegment> timeline = timelines.get(segment.getDataSource());
+      if (timeline == null) {
+        timeline = new VersionedIntervalTimeline<>(Comparators.comparable());
+        timelines.put(segment.getDataSource(), timeline);
+      }
+
+      timeline.add(
+          segment.getInterval(), segment.getVersion(), segment.getShardSpec().createChunk(segment)
+      );
     }
 
-    DruidCoordinatorRuntimeParams paramsWithReplicationManager = params.buildFromExisting()
+    Set<DataSegment> overshadowed = new HashSet<>();
+    for (VersionedIntervalTimeline<String, DataSegment> timeline : timelines.values()) {
+      for (TimelineObjectHolder<String, DataSegment> holder : timeline.findOvershadowed()) {
+        for (DataSegment dataSegment : holder.getObject().payloads()) {
+          overshadowed.add(dataSegment);
+        }
+      }
+    }
+
+    Set<DataSegment> nonOvershadowed = new HashSet<>();
+    for (DataSegment dataSegment : params.getAvailableSegments()) {
+      if (!overshadowed.contains(dataSegment)) {
+        nonOvershadowed.add(dataSegment);
+      }
+    }
+
+    for (String tier : cluster.getTierNames()) {
+      replicatorThrottler.updateReplicationState(tier);
+    }
+
+    DruidCoordinatorRuntimeParams paramsWithReplicationManager = params.buildFromExistingWithoutAvailableSegments()
                                                                        .withReplicationManager(replicatorThrottler)
+                                                                       .withAvailableSegments(nonOvershadowed)
                                                                        .build();
 
     // Run through all matched rules for available segments
-    DateTime now = new DateTime();
+    DateTime now = DateTimes.nowUtc();
     MetadataRuleManager databaseRuleManager = paramsWithReplicationManager.getDatabaseRuleManager();
 
     final List<String> segmentsWithMissingRules = Lists.newArrayListWithCapacity(MAX_MISSING_RULES);
@@ -118,8 +158,9 @@ public class DruidCoordinatorRuleRunner implements DruidCoordinatorHelper
          .emit();
     }
 
-    return paramsWithReplicationManager.buildFromExisting()
+    return paramsWithReplicationManager.buildFromExistingWithoutAvailableSegments()
                                        .withCoordinatorStats(stats)
+                                       .withAvailableSegments(params.getAvailableSegments())
                                        .build();
   }
 }

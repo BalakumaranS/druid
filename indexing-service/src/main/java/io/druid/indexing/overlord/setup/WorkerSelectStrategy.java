@@ -21,22 +21,26 @@ package io.druid.indexing.overlord.setup;
 
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
-import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableMap;
+import io.druid.guice.annotations.PublicApi;
 import io.druid.indexing.common.task.Task;
-import io.druid.indexing.overlord.ImmutableZkWorker;
-import io.druid.indexing.overlord.config.RemoteTaskRunnerConfig;
+import io.druid.indexing.overlord.ImmutableWorkerInfo;
+import io.druid.indexing.overlord.config.WorkerTaskRunnerConfig;
+
+import javax.annotation.Nullable;
 
 /**
  * The {@link io.druid.indexing.overlord.RemoteTaskRunner} uses this class to select a worker to assign tasks to.
  */
-@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type", defaultImpl = FillCapacityWorkerSelectStrategy.class)
+@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type", defaultImpl = EqualDistributionWorkerSelectStrategy.class)
 @JsonSubTypes(value = {
     @JsonSubTypes.Type(name = "fillCapacity", value = FillCapacityWorkerSelectStrategy.class),
     @JsonSubTypes.Type(name = "fillCapacityWithAffinity", value = FillCapacityWithAffinityWorkerSelectStrategy.class),
     @JsonSubTypes.Type(name = "equalDistribution", value = EqualDistributionWorkerSelectStrategy.class),
+    @JsonSubTypes.Type(name = "equalDistributionWithAffinity", value = EqualDistributionWithAffinityWorkerSelectStrategy.class),
     @JsonSubTypes.Type(name = "javascript", value = JavaScriptWorkerSelectStrategy.class)
 })
+@PublicApi
 public interface WorkerSelectStrategy
 {
   /**
@@ -46,11 +50,12 @@ public interface WorkerSelectStrategy
    * @param zkWorkers An immutable map of workers to choose from.
    * @param task      The task to assign.
    *
-   * @return A {@link io.druid.indexing.overlord.ImmutableZkWorker} to run the task if one is available.
+   * @return A {@link ImmutableWorkerInfo} to run the task if one is available.
    */
-  Optional<ImmutableZkWorker> findWorkerForTask(
-      final RemoteTaskRunnerConfig config,
-      final ImmutableMap<String, ImmutableZkWorker> zkWorkers,
-      final Task task
+  @Nullable
+  ImmutableWorkerInfo findWorkerForTask(
+      WorkerTaskRunnerConfig config,
+      ImmutableMap<String, ImmutableWorkerInfo> zkWorkers,
+      Task task
   );
 }

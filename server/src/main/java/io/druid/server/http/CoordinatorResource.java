@@ -24,8 +24,10 @@ import com.google.common.collect.Collections2;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
 import com.google.inject.Inject;
+import com.sun.jersey.spi.container.ResourceFilters;
 import io.druid.server.coordinator.DruidCoordinator;
 import io.druid.server.coordinator.LoadQueuePeon;
+import io.druid.server.http.security.StateResourceFilter;
 import io.druid.timeline.DataSegment;
 
 import javax.ws.rs.GET;
@@ -34,6 +36,7 @@ import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
+import java.util.Map;
 
 /**
  */
@@ -52,14 +55,33 @@ public class CoordinatorResource
 
   @GET
   @Path("/leader")
+  @ResourceFilters(StateResourceFilter.class)
   @Produces(MediaType.APPLICATION_JSON)
   public Response getLeader()
   {
     return Response.ok(coordinator.getCurrentLeader()).build();
   }
 
+  /**
+   * This is an unsecured endpoint, defined as such in UNSECURED_PATHS in CoordinatorJettyServerInitializer
+   */
+  @GET
+  @Path("/isLeader")
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response isLeader()
+  {
+    final boolean leading = coordinator.isLeader();
+    final Map<String, Boolean> response = ImmutableMap.of("leader", leading);
+    if (leading) {
+      return Response.ok(response).build();
+    } else {
+      return Response.status(Response.Status.NOT_FOUND).entity(response).build();
+    }
+  }
+
   @GET
   @Path("/loadstatus")
+  @ResourceFilters(StateResourceFilter.class)
   @Produces(MediaType.APPLICATION_JSON)
   public Response getLoadStatus(
       @QueryParam("simple") String simple,
@@ -78,6 +100,7 @@ public class CoordinatorResource
 
   @GET
   @Path("/loadqueue")
+  @ResourceFilters(StateResourceFilter.class)
   @Produces(MediaType.APPLICATION_JSON)
   public Response getLoadQueue(
       @QueryParam("simple") String simple,
@@ -144,16 +167,16 @@ public class CoordinatorResource
                     )
                     .put(
                         "segmentsToDrop", Collections2.transform(
-                        input.getSegmentsToDrop(),
-                        new Function<DataSegment, Object>()
-                        {
-                          @Override
-                          public String apply(DataSegment segment)
-                          {
-                            return segment.getIdentifier();
-                          }
-                        }
-                    )
+                            input.getSegmentsToDrop(),
+                            new Function<DataSegment, Object>()
+                            {
+                              @Override
+                              public String apply(DataSegment segment)
+                              {
+                                return segment.getIdentifier();
+                              }
+                            }
+                        )
                     )
                     .build();
               }

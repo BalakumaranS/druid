@@ -24,6 +24,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
 import com.google.common.collect.Iterables;
+import io.druid.java.util.common.StringUtils;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.PostAggregator;
 import io.druid.query.dimension.DimensionSpec;
@@ -54,7 +55,10 @@ public class NumericTopNMetricSpec implements TopNMetricSpec
   {
     Preconditions.checkNotNull(metric, "metric can't be null");
     Preconditions.checkNotNull(aggregatorSpecs, "aggregations cannot be null");
-    Preconditions.checkArgument(aggregatorSpecs.size() > 0, "Must have at least one AggregatorFactory");
+    Preconditions.checkArgument(
+        aggregatorSpecs.size() > 0 || postAggregatorSpecs.size() > 0,
+        "Must have at least one AggregatorFactory or PostAggregator"
+    );
 
     final AggregatorFactory aggregator = Iterables.tryFind(
         aggregatorSpecs,
@@ -131,7 +135,7 @@ public class NumericTopNMetricSpec implements TopNMetricSpec
   @Override
   public byte[] getCacheKey()
   {
-    byte[] metricBytes = com.metamx.common.StringUtils.toUtf8(metric);
+    byte[] metricBytes = StringUtils.toUtf8(metric);
 
     return ByteBuffer.allocate(1 + metricBytes.length)
                      .put(CACHE_TYPE_ID)
@@ -174,12 +178,18 @@ public class NumericTopNMetricSpec implements TopNMetricSpec
   @Override
   public boolean equals(Object o)
   {
-    if (this == o) return true;
-    if (o == null || getClass() != o.getClass()) return false;
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
 
     NumericTopNMetricSpec that = (NumericTopNMetricSpec) o;
 
-    if (metric != null ? !metric.equals(that.metric) : that.metric != null) return false;
+    if (metric != null ? !metric.equals(that.metric) : that.metric != null) {
+      return false;
+    }
 
     return true;
   }

@@ -19,15 +19,11 @@
 
 package io.druid.segment.data;
 
-import com.google.common.primitives.Ints;
-
-import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.channels.WritableByteChannel;
 
 /**
  */
-public class ByteBufferSerializer<T>
+public class ByteBufferSerializer
 {
   public static <T> T read(ByteBuffer buffer, ObjectStrategy<T> strategy)
   {
@@ -37,13 +33,5 @@ public class ByteBufferSerializer<T>
     buffer.position(bufferToUse.limit());
 
     return strategy.fromByteBuffer(bufferToUse, size);
-  }
-
-  public static <T> void writeToChannel(T obj, ObjectStrategy<T> strategy, WritableByteChannel channel)
-      throws IOException
-  {
-    byte[] toWrite = strategy.toBytes(obj);
-    channel.write(ByteBuffer.allocate(Ints.BYTES).putInt(0, toWrite.length));
-    channel.write(ByteBuffer.wrap(toWrite));
   }
 }

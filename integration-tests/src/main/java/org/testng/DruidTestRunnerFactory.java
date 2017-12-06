@@ -23,15 +23,16 @@ import com.google.common.base.Charsets;
 import com.google.common.base.Throwables;
 import com.google.inject.Injector;
 import com.google.inject.Key;
-import com.metamx.common.lifecycle.Lifecycle;
-import com.metamx.common.logger.Logger;
 import com.metamx.http.client.HttpClient;
 import com.metamx.http.client.Request;
 import com.metamx.http.client.response.StatusResponseHandler;
 import com.metamx.http.client.response.StatusResponseHolder;
-import io.druid.guice.annotations.Global;
+import io.druid.java.util.common.StringUtils;
+import io.druid.java.util.common.lifecycle.Lifecycle;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.testing.IntegrationTestingConfig;
 import io.druid.testing.guice.DruidTestModuleFactory;
+import io.druid.testing.guice.TestClient;
 import io.druid.testing.utils.RetryUtil;
 import org.jboss.netty.handler.codec.http.HttpMethod;
 import org.jboss.netty.handler.codec.http.HttpResponseStatus;
@@ -41,29 +42,26 @@ import org.testng.xml.XmlTest;
 
 import java.net.URL;
 import java.util.List;
-import java.util.concurrent.Callable;
 
 public class DruidTestRunnerFactory implements ITestRunnerFactory
 {
   private static final Logger LOG = new Logger(DruidTestRunnerFactory.class);
 
   @Override
-  public TestRunner newTestRunner(
-      ISuite suite, XmlTest test, List<IInvokedMethodListener> listeners
-  )
+  public TestRunner newTestRunner(ISuite suite, XmlTest test, List<IInvokedMethodListener> listeners)
   {
     IConfiguration configuration = TestNG.getDefault().getConfiguration();
     String outputDirectory = suite.getOutputDirectory();
     IAnnotationFinder annotationFinder = configuration.getAnnotationFinder();
     Boolean skipFailedInvocationCounts = suite.getXmlSuite().skipFailedInvocationCounts();
     return new DruidTestRunner(
-        configuration,
-        suite,
-        test,
-        outputDirectory,
-        annotationFinder,
-        skipFailedInvocationCounts,
-        listeners
+      configuration,
+      suite,
+      test,
+      outputDirectory,
+      annotationFinder,
+      skipFailedInvocationCounts,
+      listeners
     );
   }
 
@@ -88,14 +86,14 @@ public class DruidTestRunnerFactory implements ITestRunnerFactory
     {
       Injector injector = DruidTestModuleFactory.getInjector();
       IntegrationTestingConfig config = injector.getInstance(IntegrationTestingConfig.class);
-      HttpClient client = injector.getInstance(Key.get(HttpClient.class, Global.class));
+      HttpClient client = injector.getInstance(Key.get(HttpClient.class, TestClient.class));
       ;
-      waitUntilInstanceReady(client, config.getCoordinatorHost());
-      waitUntilInstanceReady(client, config.getIndexerHost());
-      waitUntilInstanceReady(client, config.getBrokerHost());
-      String routerHost = config.getRouterHost();
+      waitUntilInstanceReady(client, config.getCoordinatorUrl());
+      waitUntilInstanceReady(client, config.getIndexerUrl());
+      waitUntilInstanceReady(client, config.getBrokerUrl());
+      String routerHost = config.getRouterUrl();
       if (null != routerHost) {
-	  waitUntilInstanceReady(client, config.getRouterHost());
+        waitUntilInstanceReady(client, config.getRouterUrl());
       }
       Lifecycle lifecycle = injector.getInstance(Lifecycle.class);
       try {
@@ -103,7 +101,7 @@ public class DruidTestRunnerFactory implements ITestRunnerFactory
         runTests();
       }
       catch (Exception e) {
-        e.printStackTrace();
+        LOG.error(e, "");
         throw Throwables.propagate(e);
       }
       finally {
@@ -121,38 +119,22 @@ public class DruidTestRunnerFactory implements ITestRunnerFactory
     {
       final StatusResponseHandler handler = new StatusResponseHandler(Charsets.UTF_8);
       RetryUtil.retryUntilTrue(
-          new Callable<Boolean>()
-          {
-            @Override
-            public Boolean call() throws Exception
-            {
-              try {
-                StatusResponseHolder response = client.go(
-                    new Request(
-                        HttpMethod.GET,
-                        new URL(
-                            String.format(
-                                "http://%s/status",
-                                host
-                            )
-                        )
-                    ),
-                    handler
-                ).get();
+          () -> {
+            try {
+              StatusResponseHolder response = client.go(
+                  new Request(HttpMethod.GET, new URL(StringUtils.format("%s/status", host))),
+                  handler
+              ).get();
 
-                System.out.println(response.getStatus() + response.getContent());
-                if (response.getStatus().equals(HttpResponseStatus.OK)) {
-                  return true;
-                } else {
-                  return false;
-                }
-              }
-              catch (Throwable e) {
-                e.printStackTrace();
-                return false;
-              }
+              LOG.info("%s %s", response.getStatus(), response.getContent());
+              return response.getStatus().equals(HttpResponseStatus.OK);
             }
-          }, "Waiting for instance to be ready: [" + host + "]"
+            catch (Throwable e) {
+              LOG.error(e, "");
+              return false;
+            }
+          },
+          "Waiting for instance to be ready: [" + host + "]"
       );
     }
   }

@@ -31,39 +31,37 @@ public class DockerConfigProvider implements IntegrationTestingConfigProvider
   @NotNull
   private String dockerIp;
 
+  @JsonProperty
+  @NotNull
+  private String hadoopDir;
+
   @Override
   public IntegrationTestingConfig get()
   {
     return new IntegrationTestingConfig()
     {
       @Override
-      public String getCoordinatorHost()
+      public String getCoordinatorUrl()
       {
-        return dockerIp+":8081";
+        return "http://" + dockerIp + ":8081";
       }
 
       @Override
-      public String getIndexerHost()
+      public String getIndexerUrl()
       {
-        return dockerIp+":8090";
+        return "http://" + dockerIp + ":8090";
       }
 
       @Override
-      public String getRouterHost()
+      public String getRouterUrl()
       {
-        return dockerIp+ ":8888";
+        return "http://" + dockerIp + ":8888";
       }
 
       @Override
-      public String getBrokerHost()
+      public String getBrokerUrl()
       {
-        return dockerIp + ":8082";
-      }
-
-      @Override
-      public String getHistoricalHost()
-      {
-        return dockerIp + ":8083";
+        return "http://" + dockerIp + ":8082";
       }
 
       @Override
@@ -84,10 +82,26 @@ public class DockerConfigProvider implements IntegrationTestingConfigProvider
         return dockerIp + ":9092";
       }
 
+
       @Override
       public String getProperty(String prop)
       {
-        throw new UnsupportedOperationException("DockerConfigProvider does not support getProperty()");
+        if (prop.equals("hadoopTestDir")) {
+          return hadoopDir;
+        }
+        throw new UnsupportedOperationException("DockerConfigProvider does not support property " + prop);
+      }
+
+      @Override
+      public String getUsername()
+      {
+        return null;
+      }
+
+      @Override
+      public String getPassword()
+      {
+        return null;
       }
     };
   }

@@ -24,6 +24,7 @@ import org.joda.time.Period;
 
 import javax.validation.constraints.Min;
 import javax.validation.constraints.NotNull;
+import java.util.Objects;
 
 /**
  */
@@ -34,12 +35,41 @@ public class ServerConfig
   private int numThreads = Math.max(10, (Runtime.getRuntime().availableProcessors() * 17) / 16 + 2) + 30;
 
   @JsonProperty
+  @Min(1)
+  private int queueSize = Integer.MAX_VALUE;
+
+  @JsonProperty
+  private boolean enableRequestLimit = false;
+
+  @JsonProperty
   @NotNull
   private Period maxIdleTime = new Period("PT5m");
+
+  @JsonProperty
+  @Min(0)
+  private long defaultQueryTimeout = 300_000; // 5 minutes
+
+  @JsonProperty
+  @Min(1)
+  private long maxScatterGatherBytes = Long.MAX_VALUE;
+
+  @JsonProperty
+  @Min(1)
+  private long maxQueryTimeout = Long.MAX_VALUE;
 
   public int getNumThreads()
   {
     return numThreads;
+  }
+
+  public int getQueueSize()
+  {
+    return queueSize;
+  }
+
+  public boolean isEnableRequestLimit()
+  {
+    return enableRequestLimit;
   }
 
   public Period getMaxIdleTime()
@@ -47,12 +77,51 @@ public class ServerConfig
     return maxIdleTime;
   }
 
-  @Override
-  public String toString()
+  public long getDefaultQueryTimeout()
   {
-    return "ServerConfig{" +
-        "numThreads=" + numThreads +
-        ", maxIdleTime=" + maxIdleTime +
-        '}';
+    return defaultQueryTimeout;
+  }
+
+  public long getMaxScatterGatherBytes()
+  {
+    return maxScatterGatherBytes;
+  }
+
+  public long getMaxQueryTimeout()
+  {
+    return maxQueryTimeout;
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    ServerConfig that = (ServerConfig) o;
+    return numThreads == that.numThreads &&
+           queueSize == that.queueSize &&
+           enableRequestLimit == that.enableRequestLimit &&
+           defaultQueryTimeout == that.defaultQueryTimeout &&
+           maxScatterGatherBytes == that.maxScatterGatherBytes &&
+           Objects.equals(maxIdleTime, that.maxIdleTime) &&
+           maxQueryTimeout == that.maxQueryTimeout;
+  }
+
+  @Override
+  public int hashCode()
+  {
+    return Objects.hash(
+        numThreads,
+        queueSize,
+        enableRequestLimit,
+        maxIdleTime,
+        defaultQueryTimeout,
+        maxScatterGatherBytes,
+        maxQueryTimeout
+    );
   }
 }

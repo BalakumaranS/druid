@@ -20,23 +20,21 @@
 package io.druid.query.groupby.having;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.primitives.Bytes;
-import com.metamx.common.StringUtils;
 import io.druid.data.input.Row;
+import io.druid.query.aggregation.AggregatorFactory;
 
-import java.nio.ByteBuffer;
-import java.util.Arrays;
+import java.util.Map;
 
 /**
  * The "&lt;" operator in a "having" clause. This is similar to SQL's "having aggregation &lt; value",
  * except that an aggregation in SQL is an expression instead of an aggregation name as in Druid.
  */
-public class LessThanHavingSpec implements HavingSpec
+public class LessThanHavingSpec extends BaseHavingSpec
 {
-  private static final byte CACHE_KEY = 0x5;
+  private final String aggregationName;
+  private final Number value;
 
-  private String aggregationName;
-  private Number value;
+  private volatile Map<String, AggregatorFactory> aggregators;
 
   public LessThanHavingSpec(
       @JsonProperty("aggregation") String aggName,
@@ -60,21 +58,15 @@ public class LessThanHavingSpec implements HavingSpec
   }
 
   @Override
-  public boolean eval(Row row)
+  public void setAggregators(Map<String, AggregatorFactory> aggregators)
   {
-    return HavingSpecMetricComparator.compare(row, aggregationName, value) < 0;
+    this.aggregators = aggregators;
   }
 
   @Override
-  public byte[] getCacheKey()
+  public boolean eval(Row row)
   {
-    final byte[] aggBytes = StringUtils.toUtf8(aggregationName);
-    final byte[] valBytes = Bytes.toArray(Arrays.asList(value));
-    return ByteBuffer.allocate(1 + aggBytes.length + valBytes.length)
-                     .put(CACHE_KEY)
-                     .put(aggBytes)
-                     .put(valBytes)
-                     .array();
+    return HavingSpecMetricComparator.compare(row, aggregationName, value, aggregators) < 0;
   }
 
   /**

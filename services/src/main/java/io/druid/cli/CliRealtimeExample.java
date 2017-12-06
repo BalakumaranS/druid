@@ -20,16 +20,22 @@
 package io.druid.cli;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.inject.Binder;
+import com.google.inject.Inject;
 import com.google.inject.Module;
 import com.google.inject.name.Names;
-import com.metamx.common.logger.Logger;
 import io.airlift.airline.Command;
 import io.druid.client.DruidServer;
 import io.druid.client.InventoryView;
 import io.druid.client.ServerView;
+import io.druid.guice.DruidProcessingModule;
 import io.druid.guice.LazySingleton;
+import io.druid.guice.QueryRunnerFactoryModule;
+import io.druid.guice.QueryableModule;
 import io.druid.guice.RealtimeModule;
+import io.druid.java.util.common.logger.Logger;
+import io.druid.query.lookup.LookupModule;
 import io.druid.segment.loading.DataSegmentPusher;
 import io.druid.server.coordination.DataSegmentAnnouncer;
 import io.druid.server.initialization.jetty.ChatHandlerServerModule;
@@ -37,7 +43,11 @@ import io.druid.timeline.DataSegment;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.URI;
+import java.util.Collection;
 import java.util.List;
+import java.util.Map;
+import java.util.Properties;
 import java.util.concurrent.Executor;
 
 /**
@@ -50,6 +60,9 @@ public class CliRealtimeExample extends ServerRunnable
 {
   private static final Logger log = new Logger(CliBroker.class);
 
+  @Inject
+  private Properties properties;
+
   public CliRealtimeExample()
   {
     super(log);
@@ -58,7 +71,10 @@ public class CliRealtimeExample extends ServerRunnable
   @Override
   protected List<? extends Module> getModules()
   {
-    return ImmutableList.<Module>of(
+    return ImmutableList.of(
+        new DruidProcessingModule(),
+        new QueryableModule(),
+        new QueryRunnerFactoryModule(),
         new RealtimeModule(),
         new Module()
         {
@@ -67,6 +83,7 @@ public class CliRealtimeExample extends ServerRunnable
           {
             binder.bindConstant().annotatedWith(Names.named("serviceName")).to("druid/realtime");
             binder.bindConstant().annotatedWith(Names.named("servicePort")).to(8084);
+            binder.bindConstant().annotatedWith(Names.named("tlsServicePort")).to(8284);
 
             binder.bind(DataSegmentPusher.class).to(NoopDataSegmentPusher.class).in(LazySingleton.class);
             binder.bind(DataSegmentAnnouncer.class).to(NoopDataSegmentAnnouncer.class).in(LazySingleton.class);
@@ -74,24 +91,21 @@ public class CliRealtimeExample extends ServerRunnable
             binder.bind(ServerView.class).to(NoopServerView.class).in(LazySingleton.class);
           }
         },
-        new ChatHandlerServerModule()
+        new ChatHandlerServerModule(properties),
+        new LookupModule()
     );
   }
 
   private static class NoopServerView implements ServerView
   {
     @Override
-    public void registerServerCallback(
-        Executor exec, ServerCallback callback
-    )
+    public void registerServerRemovedCallback(Executor exec, ServerRemovedCallback callback)
     {
       // do nothing
     }
 
     @Override
-    public void registerSegmentCallback(
-        Executor exec, SegmentCallback callback
-    )
+    public void registerSegmentCallback(Executor exec, SegmentCallback callback)
     {
       // do nothing
     }
@@ -106,24 +120,50 @@ public class CliRealtimeExample extends ServerRunnable
     }
 
     @Override
-    public Iterable<DruidServer> getInventory()
+    public Collection<DruidServer> getInventory()
     {
       return ImmutableList.of();
+    }
+
+    @Override
+    public boolean isStarted()
+    {
+      return true;
+    }
+
+    @Override
+    public boolean isSegmentLoadedByServer(String serverKey, DataSegment segment)
+    {
+      return false;
     }
   }
 
   private static class NoopDataSegmentPusher implements DataSegmentPusher
   {
+
+    @Override
+    public String getPathForHadoop()
+    {
+      return "noop";
+    }
+
+    @Deprecated
     @Override
     public String getPathForHadoop(String dataSource)
     {
-      return dataSource;
+      return getPathForHadoop();
     }
 
     @Override
     public DataSegment push(File file, DataSegment segment) throws IOException
     {
       return segment;
+    }
+
+    @Override
+    public Map<String, Object> makeLoadSpec(URI uri)
+    {
+      return ImmutableMap.of();
     }
   }
 
@@ -151,12 +191,6 @@ public class CliRealtimeExample extends ServerRunnable
     public void unannounceSegments(Iterable<DataSegment> segments) throws IOException
     {
       // do nothing
-    }
-
-    @Override
-    public boolean isAnnounced(DataSegment segment)
-    {
-      return false;
     }
   }
 }

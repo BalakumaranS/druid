@@ -28,11 +28,11 @@ import com.google.common.collect.Sets;
 import com.google.inject.Binder;
 import com.google.inject.Injector;
 import com.google.inject.Key;
-import com.metamx.common.ISE;
 import io.druid.guice.ExtensionsConfig;
 import io.druid.guice.GuiceInjectors;
 import io.druid.guice.JsonConfigProvider;
 import io.druid.guice.annotations.Self;
+import io.druid.java.util.common.ISE;
 import io.druid.server.DruidNode;
 import org.junit.Assert;
 import org.junit.FixMethodOrder;
@@ -49,6 +49,8 @@ import java.net.URLClassLoader;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -61,11 +63,11 @@ public class InitializationTest
   @Test
   public void test01InitialModulesEmpty() throws Exception
   {
-    Initialization.clearLoadedModules();
+    Initialization.clearLoadedImplementations();
     Assert.assertEquals(
         "Initial set of loaded modules must be empty",
         0,
-        Initialization.getLoadedModules(DruidModule.class).size()
+        Initialization.getLoadedImplementations(DruidModule.class).size()
     );
   }
 
@@ -94,7 +96,7 @@ public class InitializationTest
 
     Assert.assertFalse(
         "modules does not contain TestDruidModule",
-        Collections2.transform(Initialization.getLoadedModules(DruidModule.class), fnClassName)
+        Collections2.transform(Initialization.getLoadedImplementations(DruidModule.class), fnClassName)
                     .contains("io.druid.initialization.InitializationTest.TestDruidModule")
     );
 
@@ -113,7 +115,8 @@ public class InitializationTest
   @Test
   public void test04DuplicateClassLoaderExtensions() throws Exception
   {
-    Initialization.getLoadersMap().put("xyz", (URLClassLoader) Initialization.class.getClassLoader());
+    final File extensionDir = temporaryFolder.newFolder();
+    Initialization.getLoadersMap().put(extensionDir, (URLClassLoader) Initialization.class.getClassLoader());
 
     Collection<DruidModule> modules = Initialization.getFromExtensions(new ExtensionsConfig(), DruidModule.class);
 
@@ -138,7 +141,7 @@ public class InitializationTest
               public void configure(Binder binder)
               {
                 JsonConfigProvider.bindInstance(
-                    binder, Key.get(DruidNode.class, Self.class), new DruidNode("test-inject", null, null)
+                    binder, Key.get(DruidNode.class, Self.class), new DruidNode("test-inject", null, null, null, true, false)
                 );
               }
             }
@@ -177,13 +180,16 @@ public class InitializationTest
   public void testGetLoadedModules()
   {
 
-    Set<DruidModule> modules = Initialization.getLoadedModules(DruidModule.class);
+    Collection<DruidModule> modules = Initialization.getLoadedImplementations(DruidModule.class);
+    HashSet<DruidModule> moduleSet = new HashSet<>(modules);
 
-    Set<DruidModule> loadedModules = Initialization.getLoadedModules(DruidModule.class);
-    Assert.assertEquals("Set from loaded modules #1 should be same!", modules, loadedModules);
+    Collection<DruidModule> loadedModules = Initialization.getLoadedImplementations(DruidModule.class);
+    Assert.assertEquals("Set from loaded modules #1 should be same!", modules.size(), loadedModules.size());
+    Assert.assertEquals("Set from loaded modules #1 should be same!", moduleSet, new HashSet<>(loadedModules));
 
-    Set<DruidModule> loadedModules2 = Initialization.getLoadedModules(DruidModule.class);
-    Assert.assertEquals("Set from loaded modules #2 should be same!", modules, loadedModules2);
+    Collection<DruidModule> loadedModules2 = Initialization.getLoadedImplementations(DruidModule.class);
+    Assert.assertEquals("Set from loaded modules #2 should be same!", modules.size(), loadedModules2.size());
+    Assert.assertEquals("Set from loaded modules #2 should be same!", moduleSet, new HashSet<>(loadedModules2));
   }
 
   @Test
@@ -194,7 +200,8 @@ public class InitializationTest
     Assert.assertArrayEquals(
         "Non-exist root extensionsDir should return an empty array of File",
         new File[]{},
-        Initialization.getExtensionFilesToLoad(new ExtensionsConfig(){
+        Initialization.getExtensionFilesToLoad(new ExtensionsConfig()
+        {
           @Override
           public String getDirectory()
           {
@@ -274,12 +281,15 @@ public class InitializationTest
   public void testGetExtensionFilesToLoad_with_load_list() throws IOException
   {
     final File extensionsDir = temporaryFolder.newFolder();
+
+    final File absolutePathExtension = temporaryFolder.newFolder();
+
     final ExtensionsConfig config = new ExtensionsConfig()
     {
       @Override
-      public List<String> getLoadList()
+      public LinkedHashSet<String> getLoadList()
       {
-        return Arrays.asList("mysql-metadata-storage", "druid-kafka-eight");
+        return Sets.newLinkedHashSet(Arrays.asList("mysql-metadata-storage", "druid-kafka-eight", absolutePathExtension.getAbsolutePath()));
       }
 
       @Override
@@ -291,13 +301,13 @@ public class InitializationTest
     final File mysql_metadata_storage = new File(extensionsDir, "mysql-metadata-storage");
     final File druid_kafka_eight = new File(extensionsDir, "druid-kafka-eight");
     final File random_extension = new File(extensionsDir, "random-extensions");
+
     mysql_metadata_storage.mkdir();
     druid_kafka_eight.mkdir();
     random_extension.mkdir();
 
-    final File[] expectedFileList = new File[]{druid_kafka_eight, mysql_metadata_storage};
+    final File[] expectedFileList = new File[]{mysql_metadata_storage, druid_kafka_eight, absolutePathExtension};
     final File[] actualFileList = Initialization.getExtensionFilesToLoad(config);
-    Arrays.sort(actualFileList);
     Assert.assertArrayEquals(expectedFileList, actualFileList);
   }
 
@@ -312,9 +322,9 @@ public class InitializationTest
     final ExtensionsConfig config = new ExtensionsConfig()
     {
       @Override
-      public List<String> getLoadList()
+      public LinkedHashSet<String> getLoadList()
       {
-        return Arrays.asList("mysql-metadata-storage", "druid-kafka-eight");
+        return Sets.newLinkedHashSet(Arrays.asList("mysql-metadata-storage", "druid-kafka-eight"));
       }
 
       @Override
@@ -385,6 +395,67 @@ public class InitializationTest
         ), config
     );
     Assert.assertArrayEquals(expectedFileList, actualFileList);
+  }
+
+  @Test
+  public void testGetURLsForClasspath() throws Exception
+  {
+    File tmpDir1 = temporaryFolder.newFolder();
+    File tmpDir2 = temporaryFolder.newFolder();
+    File tmpDir3 = temporaryFolder.newFolder();
+
+    File tmpDir1a = new File(tmpDir1, "a.jar");
+    tmpDir1a.createNewFile();
+    File tmpDir1b = new File(tmpDir1, "b.jar");
+    tmpDir1b.createNewFile();
+    new File(tmpDir1, "note1.txt").createNewFile();
+
+    File tmpDir2c = new File(tmpDir2, "c.jar");
+    tmpDir2c.createNewFile();
+    File tmpDir2d = new File(tmpDir2, "d.jar");
+    tmpDir2d.createNewFile();
+    File tmpDir2e = new File(tmpDir2, "e.JAR");
+    tmpDir2e.createNewFile();
+    new File(tmpDir2, "note2.txt").createNewFile();
+
+    String cp = tmpDir1.getAbsolutePath() + File.separator + "*"
+                + File.pathSeparator
+                + tmpDir3.getAbsolutePath()
+                + File.pathSeparator
+                + tmpDir2.getAbsolutePath() + File.separator + "*";
+
+    // getURLsForClasspath uses listFiles which does NOT guarantee any ordering for the name strings.
+    List<URL> urLsForClasspath = Initialization.getURLsForClasspath(cp);
+    Assert.assertEquals(Sets.newHashSet(tmpDir1a.toURI().toURL(), tmpDir1b.toURI().toURL()),
+                        Sets.newHashSet(urLsForClasspath.subList(0, 2)));
+    Assert.assertEquals(tmpDir3.toURI().toURL(), urLsForClasspath.get(2));
+    Assert.assertEquals(Sets.newHashSet(tmpDir2c.toURI().toURL(), tmpDir2d.toURI().toURL(), tmpDir2e.toURI().toURL()),
+                        Sets.newHashSet(urLsForClasspath.subList(3, 6)));
+
+
+  }
+
+  @Test
+  public void testExtensionsWithSameDirName() throws Exception
+  {
+    final String extensionName = "some_extension";
+    final File tmpDir1 = temporaryFolder.newFolder();
+    final File tmpDir2 = temporaryFolder.newFolder();
+    final File extension1 = new File(tmpDir1, extensionName);
+    final File extension2 = new File(tmpDir2, extensionName);
+    Assert.assertTrue(extension1.mkdir());
+    Assert.assertTrue(extension2.mkdir());
+    final File jar1 = new File(extension1, "jar1.jar");
+    final File jar2 = new File(extension2, "jar2.jar");
+
+    Assert.assertTrue(jar1.createNewFile());
+    Assert.assertTrue(jar2.createNewFile());
+
+    final ClassLoader classLoader1 = Initialization.getClassLoaderForExtension(extension1);
+    final ClassLoader classLoader2 = Initialization.getClassLoaderForExtension(extension2);
+
+    Assert.assertArrayEquals(new URL[]{jar1.toURL()}, ((URLClassLoader) classLoader1).getURLs());
+    Assert.assertArrayEquals(new URL[]{jar2.toURL()}, ((URLClassLoader) classLoader2).getURLs());
   }
 
   public static class TestDruidModule implements DruidModule

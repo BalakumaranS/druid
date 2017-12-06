@@ -21,9 +21,9 @@ package io.druid.query;
 
 import com.google.common.base.Function;
 import com.google.common.collect.Lists;
-import com.metamx.common.guava.MergeSequence;
-import com.metamx.common.guava.Sequence;
-import com.metamx.common.guava.Sequences;
+import io.druid.java.util.common.guava.MergeSequence;
+import io.druid.java.util.common.guava.Sequence;
+import io.druid.java.util.common.guava.Sequences;
 
 import java.util.Map;
 
@@ -39,8 +39,9 @@ public class UnionQueryRunner<T> implements QueryRunner<T>
   }
 
   @Override
-  public Sequence<T> run(final Query<T> query, final Map<String, Object> responseContext)
+  public Sequence<T> run(final QueryPlus<T> queryPlus, final Map<String, Object> responseContext)
   {
+    Query<T> query = queryPlus.getQuery();
     DataSource dataSource = query.getDataSource();
     if (dataSource instanceof UnionDataSource) {
 
@@ -55,7 +56,7 @@ public class UnionQueryRunner<T> implements QueryRunner<T>
                     public Sequence<T> apply(DataSource singleSource)
                     {
                       return baseRunner.run(
-                          query.withDataSource(singleSource),
+                          queryPlus.withQuery(query.withDataSource(singleSource)),
                           responseContext
                       );
                     }
@@ -64,7 +65,7 @@ public class UnionQueryRunner<T> implements QueryRunner<T>
           )
       );
     } else {
-      return baseRunner.run(query, responseContext);
+      return baseRunner.run(queryPlus, responseContext);
     }
   }
 

@@ -19,9 +19,9 @@
 
 package io.druid.query.topn;
 
-import com.metamx.common.guava.nary.BinaryFn;
-import io.druid.granularity.AllGranularity;
-import io.druid.granularity.QueryGranularity;
+import io.druid.java.util.common.granularity.AllGranularity;
+import io.druid.java.util.common.granularity.Granularity;
+import io.druid.java.util.common.guava.nary.BinaryFn;
 import io.druid.query.Result;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.AggregatorUtil;
@@ -38,9 +38,8 @@ import java.util.Map;
  */
 public class TopNBinaryFn implements BinaryFn<Result<TopNResultValue>, Result<TopNResultValue>, Result<TopNResultValue>>
 {
-  private final TopNResultMerger merger;
   private final DimensionSpec dimSpec;
-  private final QueryGranularity gran;
+  private final Granularity gran;
   private final String dimension;
   private final TopNMetricSpec topNMetricSpec;
   private final int threshold;
@@ -49,8 +48,7 @@ public class TopNBinaryFn implements BinaryFn<Result<TopNResultValue>, Result<To
   private final Comparator comparator;
 
   public TopNBinaryFn(
-      final TopNResultMerger merger,
-      final QueryGranularity granularity,
+      final Granularity granularity,
       final DimensionSpec dimSpec,
       final TopNMetricSpec topNMetricSpec,
       final int threshold,
@@ -58,7 +56,6 @@ public class TopNBinaryFn implements BinaryFn<Result<TopNResultValue>, Result<To
       final List<PostAggregator> postAggregatorSpecs
   )
   {
-    this.merger = merger;
     this.dimSpec = dimSpec;
     this.gran = granularity;
     this.topNMetricSpec = topNMetricSpec;
@@ -78,22 +75,22 @@ public class TopNBinaryFn implements BinaryFn<Result<TopNResultValue>, Result<To
   public Result<TopNResultValue> apply(Result<TopNResultValue> arg1, Result<TopNResultValue> arg2)
   {
     if (arg1 == null) {
-      return merger.getResult(arg2, comparator);
+      return arg2;
     }
     if (arg2 == null) {
-      return merger.getResult(arg1, comparator);
+      return arg1;
     }
 
-    Map<String, DimensionAndMetricValueExtractor> retVals = new LinkedHashMap<>();
+    Map<Object, DimensionAndMetricValueExtractor> retVals = new LinkedHashMap<>();
 
     TopNResultValue arg1Vals = arg1.getValue();
     TopNResultValue arg2Vals = arg2.getValue();
 
     for (DimensionAndMetricValueExtractor arg1Val : arg1Vals) {
-      retVals.put(arg1Val.getStringDimensionValue(dimension), arg1Val);
+      retVals.put(arg1Val.getDimensionValue(dimension), arg1Val);
     }
     for (DimensionAndMetricValueExtractor arg2Val : arg2Vals) {
-      final String dimensionValue = arg2Val.getStringDimensionValue(dimension);
+      final Object dimensionValue = arg2Val.getDimensionValue(dimension);
       DimensionAndMetricValueExtractor arg1Val = retVals.get(dimensionValue);
 
       if (arg1Val != null) {
@@ -120,7 +117,7 @@ public class TopNBinaryFn implements BinaryFn<Result<TopNResultValue>, Result<To
     if (gran instanceof AllGranularity) {
       timestamp = arg1.getTimestamp();
     } else {
-      timestamp = gran.toDateTime(gran.truncate(arg1.getTimestamp().getMillis()));
+      timestamp = gran.bucketStart(arg1.getTimestamp());
     }
 
     TopNResultBuilder bob = topNMetricSpec.getResultBuilder(

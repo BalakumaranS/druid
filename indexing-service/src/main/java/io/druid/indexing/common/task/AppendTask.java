@@ -26,9 +26,12 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
-import com.google.common.collect.Ordering;
 import io.druid.indexing.common.TaskToolbox;
+import io.druid.java.util.common.Intervals;
+import io.druid.java.util.common.guava.Comparators;
+import io.druid.segment.writeout.SegmentWriteOutMediumFactory;
 import io.druid.query.aggregation.AggregatorFactory;
+import io.druid.segment.IndexMerger;
 import io.druid.segment.IndexSpec;
 import io.druid.segment.IndexableAdapter;
 import io.druid.segment.QueryableIndexIndexableAdapter;
@@ -49,7 +52,6 @@ import java.util.Map;
  */
 public class AppendTask extends MergeTaskBase
 {
-
   private final IndexSpec indexSpec;
   private final List<AggregatorFactory> aggregators;
 
@@ -60,10 +62,13 @@ public class AppendTask extends MergeTaskBase
       @JsonProperty("segments") List<DataSegment> segments,
       @JsonProperty("aggregations") List<AggregatorFactory> aggregators,
       @JsonProperty("indexSpec") IndexSpec indexSpec,
+      // This parameter is left for compatibility when reading existing JSONs, to be removed in Druid 0.12.
+      @JsonProperty("buildV9Directly") Boolean buildV9Directly,
+      @JsonProperty("segmentWriteOutMediumFactory") @Nullable SegmentWriteOutMediumFactory segmentWriteOutMediumFactory,
       @JsonProperty("context") Map<String, Object> context
   )
   {
-    super(id, dataSource, segments, context);
+    super(id, dataSource, segments, segmentWriteOutMediumFactory, context);
     this.indexSpec = indexSpec == null ? new IndexSpec() : indexSpec;
     this.aggregators = aggregators;
   }
@@ -73,7 +78,7 @@ public class AppendTask extends MergeTaskBase
       throws Exception
   {
     VersionedIntervalTimeline<String, DataSegment> timeline = new VersionedIntervalTimeline<String, DataSegment>(
-        Ordering.<String>natural().nullsFirst()
+        Comparators.naturalNullsFirst()
     );
 
     for (DataSegment segment : segments.keySet()) {
@@ -82,7 +87,7 @@ public class AppendTask extends MergeTaskBase
 
     final Iterable<SegmentToMergeHolder> segmentsToMerge = Iterables.concat(
         Iterables.transform(
-            timeline.lookup(new Interval("1000-01-01/3000-01-01")),
+            timeline.lookup(Intervals.of("1000-01-01/3000-01-01")),
             new Function<TimelineObjectHolder<String, DataSegment>, Iterable<SegmentToMergeHolder>>()
             {
               @Override
@@ -98,7 +103,7 @@ public class AppendTask extends MergeTaskBase
                       {
                         DataSegment segment = chunkInput.getObject();
                         return new SegmentToMergeHolder(
-                            segment, input.getInterval(),
+                            input.getInterval(),
                             Preconditions.checkNotNull(
                                 segments.get(segment),
                                 "File for segment %s", segment.getIdentifier()
@@ -131,11 +136,13 @@ public class AppendTask extends MergeTaskBase
       );
     }
 
-    return toolbox.getIndexMerger().append(
+    IndexMerger indexMerger = toolbox.getIndexMergerV9();
+    return indexMerger.append(
         adapters,
         aggregators == null ? null : aggregators.toArray(new AggregatorFactory[aggregators.size()]),
         outDir,
-        indexSpec
+        indexSpec,
+        getSegmentWriteOutMediumFactory()
     );
   }
 
@@ -153,20 +160,13 @@ public class AppendTask extends MergeTaskBase
 
   private static class SegmentToMergeHolder
   {
-    private final DataSegment segment;
     private final Interval interval;
     private final File file;
 
-    private SegmentToMergeHolder(DataSegment segment, Interval interval, File file)
+    private SegmentToMergeHolder(Interval interval, File file)
     {
-      this.segment = segment;
       this.interval = interval;
       this.file = file;
-    }
-
-    public DataSegment getSegment()
-    {
-      return segment;
     }
 
     public Interval getInterval()

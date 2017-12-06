@@ -80,4 +80,34 @@ public abstract class DruidCoordinatorConfig
   {
     return null;
   }
+
+  @Config("druid.coordinator.loadqueuepeon.repeatDelay")
+  public Duration getLoadQueuePeonRepeatDelay()
+  {
+    return Duration.millis(50);
+  }
+
+  @Config("druid.coordinator.loadqueuepeon.type")
+  public String getLoadQueuePeonType()
+  {
+    return "curator";
+  }
+
+  @Config("druid.coordinator.loadqueuepeon.http.repeatDelay")
+  public Duration getHttpLoadQueuePeonRepeatDelay()
+  {
+    return Duration.millis(60000);
+  }
+
+  @Config("druid.coordinator.loadqueuepeon.http.hostTimeout")
+  public Duration getHttpLoadQueuePeonHostTimeout()
+  {
+    return Duration.millis(300000);
+  }
+
+  @Config("druid.coordinator.loadqueuepeon.http.batchSize")
+  public int getHttpLoadQueuePeonBatchSize()
+  {
+    return 1;
+  }
 }

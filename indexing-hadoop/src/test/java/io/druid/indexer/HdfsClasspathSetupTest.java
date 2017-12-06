@@ -23,9 +23,11 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
-import com.metamx.common.StringUtils;
 import io.druid.common.utils.UUIDUtils;
+import io.druid.java.util.common.IOE;
+import io.druid.java.util.common.StringUtils;
 import junit.framework.Assert;
+import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
@@ -71,9 +73,8 @@ public class HdfsClasspathSetupTest
   public static void setupStatic() throws IOException, ClassNotFoundException
   {
     hdfsTmpDir = File.createTempFile("hdfsClasspathSetupTest", "dir");
-    hdfsTmpDir.deleteOnExit();
     if (!hdfsTmpDir.delete()) {
-      throw new IOException(String.format("Unable to delete hdfsTmpDir [%s]", hdfsTmpDir.getAbsolutePath()));
+      throw new IOE("Unable to delete hdfsTmpDir [%s]", hdfsTmpDir.getAbsolutePath());
     }
     conf = new Configuration(true);
     conf.set(MiniDFSCluster.HDFS_MINIDFS_BASEDIR, hdfsTmpDir.getAbsolutePath());
@@ -84,8 +85,8 @@ public class HdfsClasspathSetupTest
   public void setUp() throws IOException
   {
     // intermedatePath and finalClasspath are relative to hdfsTmpDir directory.
-    intermediatePath = new Path(String.format("/tmp/classpath/%s", UUIDUtils.generateUuid()));
-    finalClasspath = new Path(String.format("/tmp/intermediate/%s", UUIDUtils.generateUuid()));
+    intermediatePath = new Path(StringUtils.format("/tmp/classpath/%s", UUIDUtils.generateUuid()));
+    finalClasspath = new Path(StringUtils.format("/tmp/intermediate/%s", UUIDUtils.generateUuid()));
     dummyJarFile = tempFolder.newFile("dummy-test.jar");
     Files.copy(
         new ByteArrayInputStream(StringUtils.toUtf8(dummyJarString)),
@@ -100,6 +101,7 @@ public class HdfsClasspathSetupTest
     if (miniCluster != null) {
       miniCluster.shutdown(true);
     }
+    FileUtils.deleteDirectory(hdfsTmpDir);
   }
 
   @After

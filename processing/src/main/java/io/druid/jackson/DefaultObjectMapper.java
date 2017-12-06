@@ -32,7 +32,7 @@ public class DefaultObjectMapper extends ObjectMapper
 {
   public DefaultObjectMapper()
   {
-    this((JsonFactory)null);
+    this((JsonFactory) null);
   }
 
   public DefaultObjectMapper(DefaultObjectMapper mapper)
@@ -45,18 +45,22 @@ public class DefaultObjectMapper extends ObjectMapper
     super(factory);
     registerModule(new DruidDefaultSerializersModule());
     registerModule(new GuavaModule());
-    registerModule(new QueryGranularityModule());
+    registerModule(new GranularityModule());
     registerModule(new AggregatorsModule());
     registerModule(new SegmentsModule());
+    registerModule(new StringComparatorModule());
+    registerModule(new SegmentizerModule());
 
     configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     configure(MapperFeature.AUTO_DETECT_GETTERS, false);
-//    configure(MapperFeature.AUTO_DETECT_CREATORS, false); https://github.com/FasterXML/jackson-databind/issues/170
+    // See https://github.com/FasterXML/jackson-databind/issues/170
+    // configure(MapperFeature.AUTO_DETECT_CREATORS, false);
     configure(MapperFeature.AUTO_DETECT_FIELDS, false);
     configure(MapperFeature.AUTO_DETECT_IS_GETTERS, false);
     configure(MapperFeature.AUTO_DETECT_SETTERS, false);
     configure(MapperFeature.ALLOW_FINAL_FIELDS_AS_MUTATORS, false);
     configure(SerializationFeature.INDENT_OUTPUT, false);
+    configure(SerializationFeature.FLUSH_AFTER_WRITE_VALUE, false);
   }
 
   @Override

@@ -20,11 +20,13 @@
 package io.druid.query.select;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.metamx.common.ISE;
-import io.druid.granularity.QueryGranularity;
+import com.google.common.collect.Sets;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.ISE;
+import io.druid.java.util.common.granularity.Granularities;
 import io.druid.query.Result;
-import org.joda.time.DateTime;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -32,6 +34,7 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Set;
 
 /**
  */
@@ -44,19 +47,21 @@ public class SelectBinaryFnTest
   @Test
   public void testApply() throws Exception
   {
-    SelectBinaryFn binaryFn = new SelectBinaryFn(QueryGranularity.ALL, new PagingSpec(null, 5), false);
+    SelectBinaryFn binaryFn = new SelectBinaryFn(Granularities.ALL, new PagingSpec(null, 5), false);
 
     Result<SelectResultValue> res1 = new Result<>(
-        new DateTime("2013-01-01"),
+        DateTimes.of("2013-01-01"),
         new SelectResultValue(
             ImmutableMap.<String, Integer>of(),
+            Sets.newHashSet("first", "fourth"),
+            Sets.newHashSet("sixth"),
             Arrays.asList(
                 new EventHolder(
                     segmentId1,
                     0,
                     ImmutableMap.<String, Object>of(
                         EventHolder.timestampKey,
-                        new DateTime("2013-01-01T00"),
+                        DateTimes.of("2013-01-01T00"),
                         "dim",
                         "first"
                     )
@@ -66,7 +71,7 @@ public class SelectBinaryFnTest
                     1,
                     ImmutableMap.<String, Object>of(
                         EventHolder.timestampKey,
-                        new DateTime("2013-01-01T03"),
+                        DateTimes.of("2013-01-01T03"),
                         "dim",
                         "fourth"
                     )
@@ -76,7 +81,7 @@ public class SelectBinaryFnTest
                     2,
                     ImmutableMap.<String, Object>of(
                         EventHolder.timestampKey,
-                        new DateTime("2013-01-01T05"),
+                        DateTimes.of("2013-01-01T05"),
                         "dim",
                         "sixth"
                     )
@@ -87,16 +92,18 @@ public class SelectBinaryFnTest
 
 
     Result<SelectResultValue> res2 = new Result<>(
-        new DateTime("2013-01-01"),
+        DateTimes.of("2013-01-01"),
         new SelectResultValue(
             ImmutableMap.<String, Integer>of(),
+            Sets.newHashSet("second", "third"),
+            Sets.newHashSet("fifth"),
             Arrays.asList(
                 new EventHolder(
                     segmentId2,
                     0,
                     ImmutableMap.<String, Object>of(
                         EventHolder.timestampKey,
-                        new DateTime("2013-01-01T00"),
+                        DateTimes.of("2013-01-01T00"),
                         "dim",
                         "second"
                     )
@@ -106,7 +113,7 @@ public class SelectBinaryFnTest
                     1,
                     ImmutableMap.<String, Object>of(
                         EventHolder.timestampKey,
-                        new DateTime("2013-01-01T02"),
+                        DateTimes.of("2013-01-01T02"),
                         "dim",
                         "third"
                     )
@@ -116,7 +123,7 @@ public class SelectBinaryFnTest
                     2,
                     ImmutableMap.<String, Object>of(
                         EventHolder.timestampKey,
-                        new DateTime("2013-01-01T04"),
+                        DateTimes.of("2013-01-01T04"),
                         "dim",
                         "fifth"
                     )
@@ -152,7 +159,7 @@ public class SelectBinaryFnTest
             0,
             ImmutableMap.<String, Object>of(
                 EventHolder.timestampKey,
-                new DateTime("2013-01-01T00"), "dim", "first"
+                DateTimes.of("2013-01-01T00"), "dim", "first"
             )
         ),
         new EventHolder(
@@ -160,7 +167,7 @@ public class SelectBinaryFnTest
             0,
             ImmutableMap.<String, Object>of(
                 EventHolder.timestampKey,
-                new DateTime("2013-01-01T00"),
+                DateTimes.of("2013-01-01T00"),
                 "dim",
                 "second"
             )
@@ -170,7 +177,7 @@ public class SelectBinaryFnTest
             1,
             ImmutableMap.<String, Object>of(
                 EventHolder.timestampKey,
-                new DateTime("2013-01-01T02"),
+                DateTimes.of("2013-01-01T02"),
                 "dim",
                 "third"
             )
@@ -180,7 +187,7 @@ public class SelectBinaryFnTest
             1,
             ImmutableMap.<String, Object>of(
                 EventHolder.timestampKey,
-                new DateTime("2013-01-01T03"),
+                DateTimes.of("2013-01-01T03"),
                 "dim",
                 "fourth"
             )
@@ -190,7 +197,7 @@ public class SelectBinaryFnTest
             2,
             ImmutableMap.<String, Object>of(
                 EventHolder.timestampKey,
-                new DateTime("2013-01-01T04"),
+                DateTimes.of("2013-01-01T04"),
                 "dim",
                 "fifth"
             )
@@ -201,6 +208,61 @@ public class SelectBinaryFnTest
 
 
     verifyEvents(exEvents, acEvents);
+  }
+
+  @Test
+  public void testColumnMerge() throws Exception
+  {
+    SelectBinaryFn binaryFn = new SelectBinaryFn(Granularities.ALL, new PagingSpec(null, 5), false);
+
+    Result<SelectResultValue> res1 = new Result<>(
+        DateTimes.of("2013-01-01"),
+        new SelectResultValue(
+            ImmutableMap.<String, Integer>of(),
+            Sets.newHashSet("first", "second", "fourth"),
+            Sets.newHashSet("eight", "nineth"),
+            Lists.<EventHolder>newArrayList(
+                new EventHolder(
+                    segmentId1,
+                    0,
+                    ImmutableMap.<String, Object>of(
+                        EventHolder.timestampKey,
+                        DateTimes.of("2013-01-01T00"), "dim", "first"
+                    )
+                ))
+        )
+    );
+
+    Result<SelectResultValue> res2 = new Result<>(
+        DateTimes.of("2013-01-01"),
+        new SelectResultValue(
+            ImmutableMap.<String, Integer>of(),
+            Sets.newHashSet("third", "second", "fifth"),
+            Sets.newHashSet("seventh"),
+            Lists.<EventHolder>newArrayList(
+                new EventHolder(
+                    segmentId2,
+                    0,
+                    ImmutableMap.<String, Object>of(
+                        EventHolder.timestampKey,
+                        DateTimes.of("2013-01-01T00"),
+                        "dim",
+                        "second"
+                    )
+                ))
+        )
+    );
+
+    Result<SelectResultValue> merged = binaryFn.apply(res1, res2);
+
+    Set<String> exDimensions = Sets.newHashSet("first", "second", "fourth", "third", "fifth");
+    Set<String> exMetrics = Sets.newHashSet("eight", "nineth", "seventh");
+
+    Set<String> acDimensions = merged.getValue().getDimensions();
+    Set<String> acMetrics = merged.getValue().getMetrics();
+
+    Assert.assertEquals(exDimensions, acDimensions);
+    Assert.assertEquals(exMetrics, acMetrics);
   }
 
   private void verifyIters(Iterator iter1, Iterator iter2)

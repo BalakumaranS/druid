@@ -34,7 +34,6 @@ import java.util.List;
  */
 public class CountAggregatorFactory extends AggregatorFactory
 {
-  private static final byte[] CACHE_KEY = new byte[]{0x0};
   private final String name;
 
   @JsonCreator
@@ -50,7 +49,7 @@ public class CountAggregatorFactory extends AggregatorFactory
   @Override
   public Aggregator factorize(ColumnSelectorFactory metricFactory)
   {
-    return new CountAggregator(name);
+    return new CountAggregator();
   }
 
   @Override
@@ -69,6 +68,12 @@ public class CountAggregatorFactory extends AggregatorFactory
   public Object combine(Object lhs, Object rhs)
   {
     return CountAggregator.combineValues(lhs, rhs);
+  }
+
+  @Override
+  public AggregateCombiner makeAggregateCombiner()
+  {
+    return new LongSumAggregateCombiner();
   }
 
   @Override
@@ -111,7 +116,7 @@ public class CountAggregatorFactory extends AggregatorFactory
   @Override
   public byte[] getCacheKey()
   {
-    return CACHE_KEY;
+    return new byte[]{AggregatorUtil.COUNT_CACHE_TYPE_ID};
   }
 
   @Override
@@ -124,12 +129,6 @@ public class CountAggregatorFactory extends AggregatorFactory
   public int getMaxIntermediateSize()
   {
     return Longs.BYTES;
-  }
-
-  @Override
-  public Object getAggregatorStartValue()
-  {
-    return 0;
   }
 
   @Override

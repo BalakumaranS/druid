@@ -20,7 +20,7 @@
 package io.druid.query.topn;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
-import com.metamx.common.IAE;
+import io.druid.java.util.common.IAE;
 
 import java.util.Map;
 
@@ -28,7 +28,7 @@ import java.util.Map;
  */
 public class LegacyTopNMetricSpec extends NumericTopNMetricSpec
 {
-  private static final String convertValue(Object metric)
+  private static String convertValue(Object metric)
   {
     final String retVal;
 

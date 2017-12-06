@@ -23,6 +23,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import io.druid.client.ImmutableDruidServer;
+import io.druid.java.util.common.DateTimes;
 import io.druid.timeline.DataSegment;
 import io.druid.timeline.partition.NoneShardSpec;
 import org.easymock.EasyMock;
@@ -61,7 +62,6 @@ public class ReservoirSegmentSamplerTest
   public void setUp() throws Exception
   {
     druidServer1 = EasyMock.createMock(ImmutableDruidServer.class);
-    druidServer1 = EasyMock.createMock(ImmutableDruidServer.class);
     druidServer2 = EasyMock.createMock(ImmutableDruidServer.class);
     druidServer3 = EasyMock.createMock(ImmutableDruidServer.class);
     druidServer4 = EasyMock.createMock(ImmutableDruidServer.class);
@@ -74,9 +74,9 @@ public class ReservoirSegmentSamplerTest
     segment3 = EasyMock.createMock(DataSegment.class);
     segment4 = EasyMock.createMock(DataSegment.class);
 
-    DateTime start1 = new DateTime("2012-01-01");
-    DateTime start2 = new DateTime("2012-02-01");
-    DateTime version = new DateTime("2012-03-01");
+    DateTime start1 = DateTimes.of("2012-01-01");
+    DateTime start2 = DateTimes.of("2012-02-01");
+    DateTime version = DateTimes.of("2012-03-01");
     segment1 = new DataSegment(
         "datasource1",
         new Interval(start1, start1.plusHours(1)),
@@ -84,7 +84,7 @@ public class ReservoirSegmentSamplerTest
         Maps.<String, Object>newHashMap(),
         Lists.<String>newArrayList(),
         Lists.<String>newArrayList(),
-        new NoneShardSpec(),
+        NoneShardSpec.instance(),
         0,
         11L
     );
@@ -95,7 +95,7 @@ public class ReservoirSegmentSamplerTest
         Maps.<String, Object>newHashMap(),
         Lists.<String>newArrayList(),
         Lists.<String>newArrayList(),
-        new NoneShardSpec(),
+        NoneShardSpec.instance(),
         0,
         7L
     );
@@ -106,7 +106,7 @@ public class ReservoirSegmentSamplerTest
         Maps.<String, Object>newHashMap(),
         Lists.<String>newArrayList(),
         Lists.<String>newArrayList(),
-        new NoneShardSpec(),
+        NoneShardSpec.instance(),
         0,
         4L
     );
@@ -117,7 +117,7 @@ public class ReservoirSegmentSamplerTest
         Maps.<String, Object>newHashMap(),
         Lists.<String>newArrayList(),
         Lists.<String>newArrayList(),
-        new NoneShardSpec(),
+        NoneShardSpec.instance(),
         0,
         8L
     );

@@ -21,13 +21,15 @@ package io.druid.query.filter;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.base.Function;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
-import com.google.common.collect.Lists;
-import io.druid.query.Druids;
+import com.google.common.collect.RangeSet;
+import com.google.common.collect.TreeRangeSet;
+import io.druid.java.util.common.StringUtils;
+import io.druid.segment.filter.AndFilter;
+import io.druid.segment.filter.Filters;
 
-import java.util.Collections;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -43,9 +45,14 @@ public class AndDimFilter implements DimFilter
       @JsonProperty("fields") List<DimFilter> fields
   )
   {
-    fields.removeAll(Collections.singletonList(null));
+    fields = DimFilters.filterNulls(fields);
     Preconditions.checkArgument(fields.size() > 0, "AND operator requires at least one field");
     this.fields = fields;
+  }
+
+  public AndDimFilter(DimFilter... fields)
+  {
+    this(Arrays.asList(fields));
   }
 
   @JsonProperty
@@ -57,20 +64,37 @@ public class AndDimFilter implements DimFilter
   @Override
   public byte[] getCacheKey()
   {
-    return DimFilterCacheHelper.computeCacheKey(DimFilterCacheHelper.AND_CACHE_ID, fields);
+    return DimFilterUtils.computeCacheKey(DimFilterUtils.AND_CACHE_ID, fields);
   }
 
   @Override
   public DimFilter optimize()
   {
-    return Druids.newAndDimFilterBuilder().fields(Lists.transform(this.getFields(), new Function<DimFilter, DimFilter>()
-    {
-      @Override
-      public DimFilter apply(DimFilter input)
-      {
-        return input.optimize();
+    List<DimFilter> elements = DimFilters.optimize(fields);
+    return elements.size() == 1 ? elements.get(0) : new AndDimFilter(elements);
+  }
+
+  @Override
+  public Filter toFilter()
+  {
+    return new AndFilter(Filters.toFilters(fields));
+  }
+
+  @Override
+  public RangeSet<String> getDimensionRangeSet(String dimension)
+  {
+    RangeSet<String> retSet = null;
+    for (DimFilter field : fields) {
+      RangeSet<String> rangeSet = field.getDimensionRangeSet(dimension);
+      if (rangeSet != null) {
+        if (retSet == null) {
+          retSet = TreeRangeSet.create(rangeSet);
+        } else {
+          retSet.removeAll(rangeSet.complement());
+        }
       }
-    })).build();
+    }
+    return retSet;
   }
 
   @Override
@@ -101,6 +125,6 @@ public class AndDimFilter implements DimFilter
   @Override
   public String toString()
   {
-    return String.format("(%s)", AND_JOINER.join(fields));
+    return StringUtils.format("(%s)", AND_JOINER.join(fields));
   }
 }

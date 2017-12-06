@@ -24,9 +24,10 @@ import com.google.common.base.Function;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
-import io.druid.concurrent.Execs;
+import io.druid.java.util.common.concurrent.Execs;
 import io.druid.curator.CuratorTestBase;
 import io.druid.jackson.DefaultObjectMapper;
+import io.druid.java.util.common.Intervals;
 import io.druid.server.coordination.DataSegmentChangeCallback;
 import io.druid.server.coordination.DataSegmentChangeHandler;
 import io.druid.server.coordination.DataSegmentChangeRequest;
@@ -40,7 +41,6 @@ import org.apache.curator.framework.recipes.cache.PathChildrenCacheEvent;
 import org.apache.curator.framework.recipes.cache.PathChildrenCacheListener;
 import org.apache.curator.utils.ZKPaths;
 import org.joda.time.Duration;
-import org.joda.time.Interval;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -82,14 +82,16 @@ public class LoadQueuePeonTest extends CuratorTestBase
     final AtomicInteger requestSignalIdx = new AtomicInteger(0);
     final AtomicInteger segmentSignalIdx = new AtomicInteger(0);
 
-    loadQueuePeon = new LoadQueuePeon(
+    loadQueuePeon = new CuratorLoadQueuePeon(
         curator,
         LOAD_QUEUE_PATH,
         jsonMapper,
         Execs.scheduledSingleThreaded("test_load_queue_peon_scheduled-%d"),
         Execs.singleThreaded("test_load_queue_peon-%d"),
-        new TestDruidCoordinatorConfig(null, null, null, null, null, null, 10, null, false, false)
+        new TestDruidCoordinatorConfig(null, null, null, null, null, null, 10, null, false, false, Duration.ZERO)
     );
+
+    loadQueuePeon.start();
 
     final CountDownLatch[] loadRequestSignal = new CountDownLatch[5];
     final CountDownLatch[] dropRequestSignal = new CountDownLatch[5];
@@ -287,15 +289,17 @@ public class LoadQueuePeonTest extends CuratorTestBase
     final CountDownLatch loadRequestSignal = new CountDownLatch(1);
     final CountDownLatch segmentLoadedSignal = new CountDownLatch(1);
 
-    loadQueuePeon = new LoadQueuePeon(
+    loadQueuePeon = new CuratorLoadQueuePeon(
         curator,
         LOAD_QUEUE_PATH,
         jsonMapper,
         Execs.scheduledSingleThreaded("test_load_queue_peon_scheduled-%d"),
         Execs.singleThreaded("test_load_queue_peon-%d"),
         // set time-out to 1 ms so that LoadQueuePeon will fail the assignment quickly
-        new TestDruidCoordinatorConfig(null, null, null, new Duration(1), null, null, 10, null, false, false)
+        new TestDruidCoordinatorConfig(null, null, null, new Duration(1), null, null, 10, null, false, false, new Duration("PT1s"))
     );
+
+    loadQueuePeon.start();
 
     loadQueueCache.getListenable().addListener(
         new PathChildrenCacheListener()
@@ -346,12 +350,12 @@ public class LoadQueuePeonTest extends CuratorTestBase
   {
     return DataSegment.builder()
                       .dataSource("test_load_queue_peon")
-                      .interval(new Interval(intervalStr))
+                      .interval(Intervals.of(intervalStr))
                       .loadSpec(ImmutableMap.<String, Object>of())
                       .version("2015-05-27T03:38:35.683Z")
                       .dimensions(ImmutableList.<String>of())
                       .metrics(ImmutableList.<String>of())
-                      .shardSpec(new NoneShardSpec())
+                      .shardSpec(NoneShardSpec.instance())
                       .binaryVersion(9)
                       .size(1200)
                       .build();

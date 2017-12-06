@@ -19,11 +19,11 @@
 
 package io.druid.segment.column;
 
-import com.metamx.collections.spatial.ImmutableRTree;
+import io.druid.collections.spatial.ImmutableRTree;
 
 /**
  */
 public interface SpatialIndex
 {
-  public ImmutableRTree getRTree();
+  ImmutableRTree getRTree();
 }

@@ -33,14 +33,16 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.PeekingIterator;
 import com.google.common.io.Closeables;
-import com.metamx.common.ISE;
-import com.metamx.common.guava.nary.BinaryFn;
-import com.metamx.common.logger.Logger;
 import io.druid.collections.CombiningIterable;
 import io.druid.data.input.InputRow;
 import io.druid.data.input.Rows;
-import io.druid.granularity.QueryGranularity;
 import io.druid.indexer.partitions.SingleDimensionPartitionsSpec;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.ISE;
+import io.druid.java.util.common.StringUtils;
+import io.druid.java.util.common.granularity.Granularity;
+import io.druid.java.util.common.guava.nary.BinaryFn;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.timeline.partition.NoneShardSpec;
 import io.druid.timeline.partition.ShardSpec;
 import io.druid.timeline.partition.SingleDimensionShardSpec;
@@ -65,8 +67,8 @@ import org.apache.hadoop.mapreduce.lib.input.SequenceFileInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 import org.apache.hadoop.mapreduce.lib.output.SequenceFileOutputFormat;
 import org.joda.time.DateTime;
-import org.joda.time.DateTimeComparator;
 import org.joda.time.Interval;
+import org.joda.time.chrono.ISOChronology;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -105,6 +107,7 @@ public class DeterminePartitionsJob implements Jobby
     this.config = config;
   }
 
+  @Override
   public boolean run()
   {
     try {
@@ -123,7 +126,7 @@ public class DeterminePartitionsJob implements Jobby
       if (!config.getPartitionsSpec().isAssumeGrouped()) {
         final Job groupByJob = Job.getInstance(
             new Configuration(),
-            String.format("%s-determine_partitions_groupby-%s", config.getDataSource(), config.getIntervals())
+            StringUtils.format("%s-determine_partitions_groupby-%s", config.getDataSource(), config.getIntervals())
         );
 
         JobHelper.injectSystemProperties(groupByJob);
@@ -163,7 +166,7 @@ public class DeterminePartitionsJob implements Jobby
        */
       final Job dimSelectionJob = Job.getInstance(
           new Configuration(),
-          String.format("%s-determine_partitions_dimselection-%s", config.getDataSource(), config.getIntervals())
+          StringUtils.format("%s-determine_partitions_dimselection-%s", config.getDataSource(), config.getIntervals())
       );
 
       dimSelectionJob.getConfiguration().set("io.sort.record.percent", "0.19");
@@ -218,7 +221,7 @@ public class DeterminePartitionsJob implements Jobby
 
       log.info("Job completed, loading up partitions for intervals[%s].", config.getSegmentGranularIntervals());
       FileSystem fileSystem = null;
-      Map<DateTime, List<HadoopyShardSpec>> shardSpecs = Maps.newTreeMap(DateTimeComparator.getInstance());
+      Map<Long, List<HadoopyShardSpec>> shardSpecs = Maps.newTreeMap();
       int shardCount = 0;
       for (Interval segmentGranularity : config.getSegmentGranularIntervals().get()) {
         final Path partitionInfoPath = config.makeSegmentPartitionInfoPath(segmentGranularity);
@@ -238,7 +241,7 @@ public class DeterminePartitionsJob implements Jobby
             log.info("DateTime[%s], partition[%d], spec[%s]", segmentGranularity, i, actualSpecs.get(i));
           }
 
-          shardSpecs.put(segmentGranularity.getStart(), actualSpecs);
+          shardSpecs.put(segmentGranularity.getStartMillis(), actualSpecs);
         } else {
           log.info("Path[%s] didn't exist!?", partitionInfoPath);
         }
@@ -254,7 +257,7 @@ public class DeterminePartitionsJob implements Jobby
 
   public static class DeterminePartitionsGroupByMapper extends HadoopDruidIndexerMapper<BytesWritable, NullWritable>
   {
-    private QueryGranularity rollupGranularity = null;
+    private Granularity rollupGranularity = null;
 
     @Override
     protected void setup(Context context)
@@ -267,12 +270,12 @@ public class DeterminePartitionsJob implements Jobby
     @Override
     protected void innerMap(
         InputRow inputRow,
-        Object value,
-        Context context
+        Context context,
+        boolean reportParseExceptions
     ) throws IOException, InterruptedException
     {
       final List<Object> groupKey = Rows.toGroupKey(
-          rollupGranularity.truncate(inputRow.getTimestampFromEpoch()),
+          rollupGranularity.bucketStart(inputRow.getTimestamp()).getMillis(),
           inputRow
       );
       context.write(
@@ -320,7 +323,7 @@ public class DeterminePartitionsJob implements Jobby
     {
       final List<Object> timeAndDims = HadoopDruidIndexerConfig.JSON_MAPPER.readValue(key.getBytes(), List.class);
 
-      final DateTime timestamp = new DateTime(timeAndDims.get(0));
+      final DateTime timestamp = new DateTime(timeAndDims.get(0), ISOChronology.getInstanceUTC());
       final Map<String, Iterable<String>> dims = (Map<String, Iterable<String>>) timeAndDims.get(1);
 
       helper.emitDimValueCounts(context, timestamp, dims);
@@ -348,15 +351,15 @@ public class DeterminePartitionsJob implements Jobby
     @Override
     protected void innerMap(
         InputRow inputRow,
-        Object value,
-        Context context
+        Context context,
+        boolean reportParseExceptions
     ) throws IOException, InterruptedException
     {
       final Map<String, Iterable<String>> dims = Maps.newHashMap();
       for (final String dim : inputRow.getDimensions()) {
         dims.put(dim, inputRow.getDimension(dim));
       }
-      helper.emitDimValueCounts(context, new DateTime(inputRow.getTimestampFromEpoch()), dims);
+      helper.emitDimValueCounts(context, DateTimes.utc(inputRow.getTimestampFromEpoch()), dims);
     }
   }
 
@@ -368,17 +371,17 @@ public class DeterminePartitionsJob implements Jobby
   {
     private final HadoopDruidIndexerConfig config;
     private final String partitionDimension;
-    private final Map<DateTime, Integer> intervalIndexes;
+    private final Map<Long, Integer> intervalIndexes;
 
     public DeterminePartitionsDimSelectionMapperHelper(HadoopDruidIndexerConfig config, String partitionDimension)
     {
       this.config = config;
       this.partitionDimension = partitionDimension;
 
-      final ImmutableMap.Builder<DateTime, Integer> timeIndexBuilder = ImmutableMap.builder();
+      final ImmutableMap.Builder<Long, Integer> timeIndexBuilder = ImmutableMap.builder();
       int idx = 0;
       for (final Interval bucketInterval : config.getGranularitySpec().bucketIntervals().get()) {
-        timeIndexBuilder.put(bucketInterval.getStart(), idx);
+        timeIndexBuilder.put(bucketInterval.getStartMillis(), idx);
         idx++;
       }
 
@@ -398,7 +401,7 @@ public class DeterminePartitionsJob implements Jobby
       }
 
       final Interval interval = maybeInterval.get();
-      final int intervalIndex = intervalIndexes.get(interval.getStart());
+      final int intervalIndex = intervalIndexes.get(interval.getStartMillis());
 
       final ByteBuffer buf = ByteBuffer.allocate(4 + 8);
       buf.putInt(intervalIndex);
@@ -563,7 +566,7 @@ public class DeterminePartitionsJob implements Jobby
     {
       final ByteBuffer groupKey = ByteBuffer.wrap(keyBytes.getGroupKey());
       groupKey.position(4); // Skip partition
-      final DateTime bucket = new DateTime(groupKey.getLong());
+      final DateTime bucket = DateTimes.utc(groupKey.getLong());
       final PeekingIterator<DimValueCount> iterator = Iterators.peekingIterator(combinedIterable.iterator());
 
       log.info(
@@ -601,7 +604,7 @@ public class DeterminePartitionsJob implements Jobby
 
         // Respect poisoning
         if (!currentDimSkip && dvc.numRows < 0) {
-          log.info("Cannot partition on multi-valued dimension: %s", dvc.dim);
+          log.info("Cannot partition on multi-value dimension: %s", dvc.dim);
           currentDimSkip = true;
         }
 
@@ -643,7 +646,7 @@ public class DeterminePartitionsJob implements Jobby
             final ShardSpec shardSpec;
 
             if (currentDimPartitions.partitions.isEmpty()) {
-              shardSpec = new NoneShardSpec();
+              shardSpec = NoneShardSpec.instance();
             } else {
               if (currentDimPartition.rows < config.getTargetPartitionSize() * SHARD_COMBINE_THRESHOLD) {
                 // Combine with previous shard

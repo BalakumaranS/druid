@@ -24,11 +24,13 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Function;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
-import com.metamx.common.logger.Logger;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.server.DruidNode;
 import io.druid.server.coordination.DruidServerMetadata;
+import io.druid.server.coordination.ServerType;
 import io.druid.timeline.DataSegment;
 
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -56,12 +58,13 @@ public class DruidServer implements Comparable
   public DruidServer(
       DruidNode node,
       DruidServerConfig config,
-      String type
+      ServerType type
   )
   {
     this(
+        node.getHostAndPortToUse(),
         node.getHostAndPort(),
-        node.getHostAndPort(),
+        node.getHostAndTlsPort(),
         config.getMaxSize(),
         type,
         config.getTier(),
@@ -72,19 +75,21 @@ public class DruidServer implements Comparable
   @JsonCreator
   public DruidServer(
       @JsonProperty("name") String name,
-      @JsonProperty("host") String host,
+      @JsonProperty("host") String hostAndPort,
+      @JsonProperty("hostAndTlsPort") String hostAndTlsPort,
       @JsonProperty("maxSize") long maxSize,
-      @JsonProperty("type") String type,
+      @JsonProperty("type") ServerType type,
       @JsonProperty("tier") String tier,
       @JsonProperty("priority") int priority
   )
   {
-    this.metadata = new DruidServerMetadata(name, host, maxSize, type, tier, priority);
+    this.metadata = new DruidServerMetadata(name, hostAndPort, hostAndTlsPort, maxSize, type, tier, priority);
 
     this.dataSources = new ConcurrentHashMap<String, DruidDataSource>();
     this.segments = new ConcurrentHashMap<String, DataSegment>();
   }
 
+  @JsonProperty
   public String getName()
   {
     return metadata.getName();
@@ -95,13 +100,23 @@ public class DruidServer implements Comparable
     return metadata;
   }
 
-  @JsonProperty
   public String getHost()
   {
-    return metadata.getHost();
+    return getHostAndTlsPort() != null ? getHostAndTlsPort() : getHostAndPort();
+  }
+
+  @JsonProperty("host")
+  public String getHostAndPort()
+  {
+    return metadata.getHostAndPort();
   }
 
   @JsonProperty
+  public String getHostAndTlsPort()
+  {
+    return metadata.getHostAndTlsPort();
+  }
+
   public long getCurrSize()
   {
     return currSize;
@@ -114,7 +129,7 @@ public class DruidServer implements Comparable
   }
 
   @JsonProperty
-  public String getType()
+  public ServerType getType()
   {
     return metadata.getType();
   }
@@ -125,9 +140,9 @@ public class DruidServer implements Comparable
     return metadata.getTier();
   }
 
-  public boolean isAssignable()
+  public boolean segmentReplicatable()
   {
-    return metadata.isAssignable();
+    return metadata.segmentReplicatable();
   }
 
   @JsonProperty
@@ -136,7 +151,11 @@ public class DruidServer implements Comparable
     return metadata.getPriority();
   }
 
-  @JsonProperty
+  public String getScheme()
+  {
+    return metadata.getHostAndTlsPort() != null ? "https" : "http";
+  }
+
   public Map<String, DataSegment> getSegments()
   {
     // Copying the map slows things down a lot here, don't use Immutable Map here
@@ -148,9 +167,10 @@ public class DruidServer implements Comparable
     return segments.get(segmentName);
   }
 
-  public DruidServer addDataSegment(String segmentId, DataSegment segment)
+  public DruidServer addDataSegment(DataSegment segment)
   {
     synchronized (lock) {
+      final String segmentId = segment.getIdentifier();
       DataSegment shouldNotExist = segments.get(segmentId);
 
       if (shouldNotExist != null) {
@@ -169,7 +189,7 @@ public class DruidServer implements Comparable
         dataSources.put(dataSourceName, dataSource);
       }
 
-      dataSource.addSegment(segmentId, segment);
+      dataSource.addSegment(segment);
 
       segments.put(segmentId, segment);
       currSize += segment.getSize();
@@ -180,9 +200,7 @@ public class DruidServer implements Comparable
   public DruidServer addDataSegments(DruidServer server)
   {
     synchronized (lock) {
-      for (Map.Entry<String, DataSegment> entry : server.segments.entrySet()) {
-        addDataSegment(entry.getKey(), entry.getValue());
-      }
+      server.segments.values().forEach(this::addDataSegment);
     }
     return this;
   }
@@ -227,9 +245,18 @@ public class DruidServer implements Comparable
     return dataSources.get(dataSource);
   }
 
-  public Iterable<DruidDataSource> getDataSources()
+  public Collection<DruidDataSource> getDataSources()
   {
     return dataSources.values();
+  }
+
+  public void removeAllSegments()
+  {
+    synchronized (lock) {
+      dataSources.clear();
+      segments.clear();
+      currSize = 0;
+    }
   }
 
   @Override
@@ -244,7 +271,7 @@ public class DruidServer implements Comparable
 
     DruidServer that = (DruidServer) o;
 
-    if (getName() != null ? !getName().equals(that.getName()) : that.getName() != null) {
+    if (!metadata.equals(that.metadata)) {
       return false;
     }
 
@@ -254,7 +281,7 @@ public class DruidServer implements Comparable
   @Override
   public int hashCode()
   {
-    return getName() != null ? getName().hashCode() : 0;
+    return metadata.hashCode();
   }
 
   @Override

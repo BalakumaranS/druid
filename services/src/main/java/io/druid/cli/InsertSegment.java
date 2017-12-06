@@ -1,18 +1,18 @@
 /*
  * Licensed to Metamarkets Group Inc. (Metamarkets) under one
- * or more contributor license agreements.  See the NOTICE file
+ * or more contributor license agreements. See the NOTICE file
  * distributed with this work for additional information
- * regarding copyright ownership.  Metamarkets licenses this file
+ * regarding copyright ownership. Metamarkets licenses this file
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * with the License. You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
+ * KIND, either express or implied. See the License for the
  * specific language governing permissions and limitations
  * under the License.
  */
@@ -27,13 +27,16 @@ import com.google.inject.Binder;
 import com.google.inject.Injector;
 import com.google.inject.Key;
 import com.google.inject.Module;
-import com.metamx.common.logger.Logger;
 import io.airlift.airline.Command;
 import io.airlift.airline.Option;
+import io.druid.guice.DruidProcessingModule;
 import io.druid.guice.JsonConfigProvider;
+import io.druid.guice.QueryRunnerFactoryModule;
+import io.druid.guice.QueryableModule;
 import io.druid.guice.annotations.Json;
 import io.druid.guice.annotations.Self;
 import io.druid.indexing.overlord.IndexerMetadataStorageCoordinator;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.segment.loading.DataSegmentFinder;
 import io.druid.segment.loading.SegmentLoadingException;
 import io.druid.server.DruidNode;
@@ -41,7 +44,6 @@ import io.druid.timeline.DataSegment;
 
 import java.io.IOException;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 
 /**
@@ -57,8 +59,8 @@ public class InsertSegment extends GuiceRunnable
   @Option(name = "--workingDir", description = "The directory path where segments are stored. This tool will recursively look for segments underneath this directory and insert/update these segments in metdata storage.", required = true)
   private String workingDirPath;
 
-  @Option(name = "--updateDescriptor", description = "if set to true, this tool will update loadSpec field in descriptor.json if the path in loadSpec is different from where desciptor.json was found. Default value is true", required = false)
-  private boolean updateDescriptor = true;
+  @Option(name = "--updateDescriptor", description = "if set to true, this tool will update loadSpec field in descriptor.json (partitionNum_descriptor.json for HDFS data storage) if the path in loadSpec is different from where desciptor.json (partitionNum_descriptor.json for HDFS data storage) was found. Default value is true", required = false)
+  private String updateDescriptor;
 
   private ObjectMapper mapper;
   private IndexerMetadataStorageCoordinator indexerMetadataStorageCoordinator;
@@ -72,13 +74,19 @@ public class InsertSegment extends GuiceRunnable
   protected List<? extends Module> getModules()
   {
     return ImmutableList.<Module>of(
+        // It's unknown if those modules are required in InsertSegment.
+        // Maybe some of those modules could be removed.
+        // See https://github.com/druid-io/druid/pull/4429#discussion_r123603498
+        new DruidProcessingModule(),
+        new QueryableModule(),
+        new QueryRunnerFactoryModule(),
         new Module()
         {
           @Override
           public void configure(Binder binder)
           {
             JsonConfigProvider.bindInstance(
-                binder, Key.get(DruidNode.class, Self.class), new DruidNode("tools", "localhost", -1)
+                binder, Key.get(DruidNode.class, Self.class), new DruidNode("tools", "localhost", -1, null, true, false)
             );
           }
         }
@@ -93,11 +101,11 @@ public class InsertSegment extends GuiceRunnable
     indexerMetadataStorageCoordinator = injector.getInstance(IndexerMetadataStorageCoordinator.class);
     final DataSegmentFinder dataSegmentFinder = injector.getInstance(DataSegmentFinder.class);
 
-    log.info("Start seraching segments under [%s]", workingDirPath);
+    log.info("Start searching segments under [%s]", workingDirPath);
 
     Set<DataSegment> segments = null;
     try {
-      segments = dataSegmentFinder.findSegments(workingDirPath, updateDescriptor);
+      segments = dataSegmentFinder.findSegments(workingDirPath, Boolean.valueOf(updateDescriptor));
     }
     catch (SegmentLoadingException e) {
       Throwables.propagate(e);

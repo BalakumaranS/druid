@@ -21,6 +21,7 @@ package io.druid.metadata;
 
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
+import io.druid.java.util.common.StringUtils;
 import io.druid.metadata.storage.derby.DerbyConnector;
 import org.junit.Assert;
 import org.junit.rules.ExternalResource;
@@ -48,7 +49,7 @@ public class TestDerbyConnector extends DerbyConnector
       String jdbcUri
   )
   {
-    super(config, dbTables, new DBI(jdbcUri + ";create=true"));
+    super(new NoopMetadataStorageProvider().get(), config, dbTables, new DBI(jdbcUri + ";create=true"));
     this.jdbcUri = jdbcUri;
   }
 
@@ -60,7 +61,7 @@ public class TestDerbyConnector extends DerbyConnector
     catch (UnableToObtainConnectionException e) {
       SQLException cause = (SQLException) e.getCause();
       // error code "08006" indicates proper shutdown
-      Assert.assertEquals(String.format("Derby not shutdown: [%s]", cause.toString()), "08006", cause.getSQLState());
+      Assert.assertEquals(StringUtils.format("Derby not shutdown: [%s]", cause.toString()), "08006", cause.getSQLState());
     }
   }
 

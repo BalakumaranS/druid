@@ -24,7 +24,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
-import com.metamx.common.Granularity;
 import io.druid.indexer.hadoop.DatasourceIngestionSpec;
 import io.druid.indexer.hadoop.WindowedDataSegment;
 import io.druid.indexer.path.DatasourcePathSpec;
@@ -33,6 +32,8 @@ import io.druid.indexer.path.PathSpec;
 import io.druid.indexer.path.StaticPathSpec;
 import io.druid.indexer.path.UsedSegmentLister;
 import io.druid.jackson.DefaultObjectMapper;
+import io.druid.java.util.common.Intervals;
+import io.druid.java.util.common.granularity.Granularities;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.segment.indexing.DataSchema;
 import io.druid.segment.indexing.granularity.UniformGranularitySpec;
@@ -43,6 +44,7 @@ import org.joda.time.Interval;
 import org.junit.Assert;
 import org.junit.Test;
 
+import java.io.IOException;
 import java.util.Map;
 
 /**
@@ -50,8 +52,8 @@ import java.util.Map;
 public class HadoopIngestionSpecUpdateDatasourcePathSpecSegmentsTest
 {
   private final String testDatasource = "test";
-  private final Interval testDatasourceInterval = new Interval("1970/3000");
-  private final Interval testDatasourceIntervalPartial = new Interval("2050/3000");
+  private final Interval testDatasourceInterval = Intervals.of("1970/3000");
+  private final Interval testDatasourceIntervalPartial = Intervals.of("2050/3000");
   private final ObjectMapper jsonMapper;
 
   public HadoopIngestionSpecUpdateDatasourcePathSpecSegmentsTest()
@@ -64,7 +66,7 @@ public class HadoopIngestionSpecUpdateDatasourcePathSpecSegmentsTest
 
   private static final DataSegment SEGMENT = new DataSegment(
       "test1",
-      Interval.parse("2000/3000"),
+      Intervals.of("2000/3000"),
       "ver",
       ImmutableMap.<String, Object>of(
           "type", "local",
@@ -72,7 +74,7 @@ public class HadoopIngestionSpecUpdateDatasourcePathSpecSegmentsTest
       ),
       ImmutableList.of("host"),
       ImmutableList.of("visited_sum", "unique_hosts"),
-      new NoneShardSpec(),
+      NoneShardSpec.instance(),
       9,
       2
   );
@@ -91,7 +93,7 @@ public class HadoopIngestionSpecUpdateDatasourcePathSpecSegmentsTest
     PathSpec pathSpec = new DatasourcePathSpec(
         jsonMapper,
         null,
-        new DatasourceIngestionSpec(testDatasource, testDatasourceInterval, null, null, null, null, null, false),
+        new DatasourceIngestionSpec(testDatasource, testDatasourceInterval, null, null, null, null, null, false, null),
         null
     );
     HadoopDruidIndexerConfig config = testRunUpdateSegmentListIfDatasourcePathSpecIsUsed(
@@ -105,13 +107,77 @@ public class HadoopIngestionSpecUpdateDatasourcePathSpecSegmentsTest
   }
 
   @Test
+  public void testupdateSegmentListIfDatasourcePathSpecWithMatchingUserSegments() throws Exception
+  {
+    PathSpec pathSpec = new DatasourcePathSpec(
+        jsonMapper,
+        null,
+        new DatasourceIngestionSpec(
+            testDatasource,
+            testDatasourceInterval,
+            null,
+            ImmutableList.<DataSegment>of(SEGMENT),
+            null,
+            null,
+            null,
+            false,
+            null
+        ),
+        null
+    );
+    HadoopDruidIndexerConfig config = testRunUpdateSegmentListIfDatasourcePathSpecIsUsed(
+        pathSpec,
+        testDatasourceInterval
+    );
+    Assert.assertEquals(
+        ImmutableList.of(WindowedDataSegment.of(SEGMENT)),
+        ((DatasourcePathSpec) config.getPathSpec()).getSegments()
+    );
+  }
+
+  @Test(expected = IOException.class)
+  public void testupdateSegmentListThrowsExceptionWithUserSegmentsMismatch() throws Exception
+  {
+    PathSpec pathSpec = new DatasourcePathSpec(
+        jsonMapper,
+        null,
+        new DatasourceIngestionSpec(
+            testDatasource,
+            testDatasourceInterval,
+            null,
+            ImmutableList.<DataSegment>of(SEGMENT.withVersion("v2")),
+            null,
+            null,
+            null,
+            false,
+            null
+        ),
+        null
+    );
+    testRunUpdateSegmentListIfDatasourcePathSpecIsUsed(
+        pathSpec,
+        testDatasourceInterval
+    );
+  }
+
+  @Test
   public void testupdateSegmentListIfDatasourcePathSpecIsUsedWithJustDatasourcePathSpecAndPartialInterval()
       throws Exception
   {
     PathSpec pathSpec = new DatasourcePathSpec(
         jsonMapper,
         null,
-        new DatasourceIngestionSpec(testDatasource, testDatasourceIntervalPartial, null, null, null, null, null, false),
+        new DatasourceIngestionSpec(
+            testDatasource,
+            testDatasourceIntervalPartial,
+            null,
+            null,
+            null,
+            null,
+            null,
+            false,
+            null
+        ),
         null
     );
     HadoopDruidIndexerConfig config = testRunUpdateSegmentListIfDatasourcePathSpecIsUsed(
@@ -133,7 +199,17 @@ public class HadoopIngestionSpecUpdateDatasourcePathSpecSegmentsTest
             new DatasourcePathSpec(
                 jsonMapper,
                 null,
-                new DatasourceIngestionSpec(testDatasource, testDatasourceInterval, null, null, null, null, null, false),
+                new DatasourceIngestionSpec(
+                    testDatasource,
+                    testDatasourceInterval,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    false,
+                    null
+                ),
                 null
             )
         )
@@ -160,12 +236,11 @@ public class HadoopIngestionSpecUpdateDatasourcePathSpecSegmentsTest
             null,
             new AggregatorFactory[0],
             new UniformGranularitySpec(
-                Granularity.DAY,
+                Granularities.DAY,
                 null,
-                ImmutableList.of(
-                    new Interval("2010-01-01/P1D")
-                )
+                ImmutableList.of(Intervals.of("2010-01-01/P1D"))
             ),
+            null,
             jsonMapper
         ),
         new HadoopIOConfig(

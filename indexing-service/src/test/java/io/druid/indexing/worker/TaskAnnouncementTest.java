@@ -20,6 +20,7 @@
 package io.druid.indexing.worker;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.druid.indexing.common.TaskLocation;
 import io.druid.indexing.common.TaskStatus;
 import io.druid.indexing.common.TestUtils;
 import io.druid.indexing.common.task.RealtimeIndexTask;
@@ -57,19 +58,19 @@ public class TaskAnnouncementTest
         "theid",
         new TaskResource("rofl", 2),
         new FireDepartment(
-            new DataSchema("foo", null, new AggregatorFactory[0], null, new DefaultObjectMapper()),
+            new DataSchema("foo", null, new AggregatorFactory[0], null, null, new DefaultObjectMapper()),
             new RealtimeIOConfig(
                 new LocalFirehoseFactory(new File("lol"), "rofl", null), new PlumberSchool()
-            {
-              @Override
-              public Plumber findPlumber(
-                  DataSchema schema, RealtimeTuningConfig config, FireDepartmentMetrics metrics
-              )
-              {
-                return null;
-              }
+                {
+                  @Override
+                  public Plumber findPlumber(
+                      DataSchema schema, RealtimeTuningConfig config, FireDepartmentMetrics metrics
+                  )
+                  {
+                    return null;
+                  }
 
-            },
+                },
                 null
             ),
             null
@@ -77,7 +78,7 @@ public class TaskAnnouncementTest
         null
     );
     final TaskStatus status = TaskStatus.running(task.getId());
-    final TaskAnnouncement announcement = TaskAnnouncement.create(task, status);
+    final TaskAnnouncement announcement = TaskAnnouncement.create(task, status, TaskLocation.unknown());
 
     final String statusJson = jsonMapper.writeValueAsString(status);
     final String announcementJson = jsonMapper.writeValueAsString(announcement);

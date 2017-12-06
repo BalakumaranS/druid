@@ -19,153 +19,145 @@
 
 package io.druid.segment.data;
 
-import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
-import com.google.common.collect.Iterables;
-import com.google.common.io.ByteStreams;
-import com.google.common.io.Closeables;
-import com.google.common.io.CountingOutputStream;
-import com.google.common.io.InputSupplier;
 import com.google.common.primitives.Ints;
+import io.druid.java.util.common.io.smoosh.FileSmoosher;
+import io.druid.segment.writeout.WriteOutBytes;
+import io.druid.segment.writeout.SegmentWriteOutMedium;
+import io.druid.segment.serde.MetaSerdeHelper;
+import it.unimi.dsi.fastutil.ints.IntList;
 
-import java.io.Closeable;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.nio.channels.Channels;
-import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
-import java.util.Arrays;
-import java.util.List;
 
 /**
  * Streams arrays of objects out in the binary format described by VSizeIndexed
  */
-public class VSizeIndexedWriter extends MultiValueIndexedIntsWriter implements Closeable
+public class VSizeIndexedWriter extends MultiValueIndexedIntsWriter
 {
   private static final byte VERSION = 0x1;
-  private static final byte[] EMPTY_ARRAY = new byte[]{};
 
-  private final int maxId;
+  private static final MetaSerdeHelper<VSizeIndexedWriter> metaSerdeHelper = MetaSerdeHelper
+      .firstWriteByte((VSizeIndexedWriter x) -> VERSION)
+      .writeByte(x -> VSizeIndexedInts.getNumBytesForMax(x.maxId))
+      .writeInt(x -> Ints.checkedCast(x.headerOut.size() + x.valuesOut.size() + Integer.BYTES))
+      .writeInt(x -> x.numWritten);
 
-  private CountingOutputStream headerOut = null;
-  private CountingOutputStream valuesOut = null;
-  int numWritten = 0;
-  private final IOPeon ioPeon;
-  private final String metaFileName;
-  private final String headerFileName;
-  private final String valuesFileName;
-
-  public VSizeIndexedWriter(
-      IOPeon ioPeon,
-      String filenameBase,
-      int maxId
-  )
+  private enum WriteInt
   {
-    this.ioPeon = ioPeon;
-    this.metaFileName = String.format("%s.meta", filenameBase);
-    this.headerFileName = String.format("%s.header", filenameBase);
-    this.valuesFileName = String.format("%s.values", filenameBase);
-    this.maxId = maxId;
+    ONE_BYTE {
+      @Override
+      void write(WriteOutBytes out, int v) throws IOException
+      {
+        out.write(v);
+      }
+    },
+    TWO_BYTES {
+      @Override
+      void write(WriteOutBytes out, int v) throws IOException
+      {
+        out.write(v >> 8);
+        out.write(v);
+      }
+    },
+    THREE_BYTES {
+      @Override
+      void write(WriteOutBytes out, int v) throws IOException
+      {
+        out.write(v >> 16);
+        out.write(v >> 8);
+        out.write(v);
+      }
+    },
+    FOUR_BYTES {
+      @Override
+      void write(WriteOutBytes out, int v) throws IOException
+      {
+        out.writeInt(v);
+      }
+    };
+
+    abstract void write(WriteOutBytes out, int v) throws IOException;
   }
 
-  public void open() throws IOException
+  private final int maxId;
+  private final WriteInt writeInt;
+
+  private final SegmentWriteOutMedium segmentWriteOutMedium;
+  private WriteOutBytes headerOut = null;
+  private WriteOutBytes valuesOut = null;
+  private int numWritten = 0;
+  private boolean numBytesForMaxWritten = false;
+
+  public VSizeIndexedWriter(SegmentWriteOutMedium segmentWriteOutMedium, int maxId)
   {
-    headerOut = new CountingOutputStream(ioPeon.makeOutputStream(headerFileName));
-    valuesOut = new CountingOutputStream(ioPeon.makeOutputStream(valuesFileName));
+    this.segmentWriteOutMedium = segmentWriteOutMedium;
+    this.maxId = maxId;
+    this.writeInt = WriteInt.values()[VSizeIndexedInts.getNumBytesForMax(maxId) - 1];
   }
 
   @Override
-  protected void addValues(List<Integer> val) throws IOException
+  public void open() throws IOException
   {
-    write(val);
+    headerOut = segmentWriteOutMedium.makeWriteOutBytes();
+    valuesOut = segmentWriteOutMedium.makeWriteOutBytes();
   }
 
-  public void write(List<Integer> ints) throws IOException
+  @Override
+  protected void addValues(IntList ints) throws IOException
   {
-    byte[] bytesToWrite = ints == null ? EMPTY_ARRAY : VSizeIndexedInts.getBytesNoPaddingfromList(ints, maxId);
-
-    valuesOut.write(bytesToWrite);
-
-    headerOut.write(Ints.toByteArray((int) valuesOut.getCount()));
-
+    if (numBytesForMaxWritten) {
+      throw new IllegalStateException("written out already");
+    }
+    if (ints != null) {
+      for (int i = 0; i < ints.size(); i++) {
+        int value = ints.getInt(i);
+        Preconditions.checkState(value >= 0 && value <= maxId);
+        writeInt.write(valuesOut, value);
+      }
+    }
+    headerOut.writeInt(Ints.checkedCast(valuesOut.size()));
     ++numWritten;
   }
 
   @Override
-  public void close() throws IOException
+  public long getSerializedSize() throws IOException
   {
-    final byte numBytesForMax = VSizeIndexedInts.getNumBytesForMax(maxId);
+    writeNumBytesForMax();
+    return metaSerdeHelper.size(this) + headerOut.size() + valuesOut.size();
+  }
 
-    valuesOut.write(new byte[4 - numBytesForMax]);
+  @Override
+  public void writeTo(WritableByteChannel channel, FileSmoosher smoosher) throws IOException
+  {
+    writeNumBytesForMax();
 
-    Closeables.close(headerOut, false);
-    Closeables.close(valuesOut, false);
-
-    final long numBytesWritten = headerOut.getCount() + valuesOut.getCount();
+    final long numBytesWritten = headerOut.size() + valuesOut.size();
 
     Preconditions.checkState(
-        headerOut.getCount() == (numWritten * 4),
+        headerOut.size() == (numWritten * 4),
         "numWritten[%s] number of rows should have [%s] bytes written to headerOut, had[%s]",
         numWritten,
         numWritten * 4,
-        headerOut.getCount()
+        headerOut.size()
     );
     Preconditions.checkState(
-        numBytesWritten < Integer.MAX_VALUE, "Wrote[%s] bytes, which is too many.", numBytesWritten
+        numBytesWritten < Integer.MAX_VALUE - Integer.BYTES,
+        "Wrote[%s] bytes, which is too many.",
+        numBytesWritten
     );
 
-    OutputStream metaOut = ioPeon.makeOutputStream(metaFileName);
+    metaSerdeHelper.writeTo(channel, this);
+    headerOut.writeTo(channel);
+    valuesOut.writeTo(channel);
+  }
 
-    try {
-      metaOut.write(new byte[]{VERSION, numBytesForMax});
-      metaOut.write(Ints.toByteArray((int) numBytesWritten + 4));
-      metaOut.write(Ints.toByteArray(numWritten));
+  private void writeNumBytesForMax() throws IOException
+  {
+    if (!numBytesForMaxWritten) {
+      final byte numBytesForMax = VSizeIndexedInts.getNumBytesForMax(maxId);
+      valuesOut.write(new byte[4 - numBytesForMax]);
+      numBytesForMaxWritten = true;
     }
-    finally {
-      metaOut.close();
-    }
-  }
-
-  public InputSupplier<InputStream> combineStreams()
-  {
-    return ByteStreams.join(
-        Iterables.transform(
-            Arrays.asList(metaFileName, headerFileName, valuesFileName),
-            new Function<String,InputSupplier<InputStream>>() {
-
-              @Override
-              public InputSupplier<InputStream> apply(final String input)
-              {
-                return new InputSupplier<InputStream>()
-                {
-                  @Override
-                  public InputStream getInput() throws IOException
-                  {
-                    return ioPeon.makeInputStream(input);
-                  }
-                };
-              }
-            }
-        )
-    );
-  }
-
-  @Override
-  public long getSerializedSize()
-  {
-    return 1 +    // version
-           1 +    // numBytes
-           4 +    // numBytesWritten
-           4 +    // numElements
-           headerOut.getCount() +
-           valuesOut.getCount();
-  }
-
-  @Override
-  public void writeToChannel(WritableByteChannel channel) throws IOException
-  {
-    final ReadableByteChannel from = Channels.newChannel(combineStreams().getInput());
-    ByteStreams.copy(from, channel);
   }
 }

@@ -21,16 +21,19 @@ package io.druid.server.coordinator.helper;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
-import com.metamx.common.logger.Logger;
+import com.google.inject.Inject;
+
 import io.druid.client.indexing.IndexingServiceClient;
-import io.druid.common.utils.JodaUtils;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.JodaUtils;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.metadata.MetadataSegmentManager;
+import io.druid.server.coordinator.DruidCoordinatorConfig;
 import io.druid.server.coordinator.DruidCoordinatorRuntimeParams;
-import org.joda.time.Duration;
 import org.joda.time.Interval;
 
+import java.util.Collection;
 import java.util.List;
-import java.util.Set;
 
 /**
  */
@@ -47,21 +50,23 @@ public class DruidCoordinatorSegmentKiller implements DruidCoordinatorHelper
   private final MetadataSegmentManager segmentManager;
   private final IndexingServiceClient indexingServiceClient;
 
+  @Inject
   public DruidCoordinatorSegmentKiller(
       MetadataSegmentManager segmentManager,
       IndexingServiceClient indexingServiceClient,
-      Duration retainDuration,
-      Duration period,
-      int maxSegmentsToKill
+      DruidCoordinatorConfig config
   )
   {
-    this.period = period.getMillis();
-    Preconditions.checkArgument(this.period > 0, "coordinator kill period must be > 0");
+    this.period = config.getCoordinatorKillPeriod().getMillis();
+    Preconditions.checkArgument(
+        this.period > config.getCoordinatorIndexingPeriod().getMillis(),
+        "coordinator kill period must be greater than druid.coordinator.period.indexingPeriod"
+    );
 
-    this.retainDuration = retainDuration.getMillis();
+    this.retainDuration = config.getCoordinatorKillDurationToRetain().getMillis();
     Preconditions.checkArgument(this.retainDuration >= 0, "coordinator kill retainDuration must be >= 0");
 
-    this.maxSegmentsToKill = maxSegmentsToKill;
+    this.maxSegmentsToKill = config.getCoordinatorKillMaxSegments();
     Preconditions.checkArgument(this.maxSegmentsToKill > 0, "coordinator kill maxSegments must be > 0");
 
     log.info(
@@ -78,7 +83,17 @@ public class DruidCoordinatorSegmentKiller implements DruidCoordinatorHelper
   @Override
   public DruidCoordinatorRuntimeParams run(DruidCoordinatorRuntimeParams params)
   {
-    Set<String> whitelist = params.getCoordinatorDynamicConfig().getKillDataSourceWhitelist();
+    boolean killAllDataSources = params.getCoordinatorDynamicConfig().isKillAllDataSources();
+    Collection<String> whitelist = params.getCoordinatorDynamicConfig().getKillDataSourceWhitelist();
+
+    if (killAllDataSources && whitelist != null && !whitelist.isEmpty()) {
+      log.error("killAllDataSources can't be true when killDataSourceWhitelist is non-empty, No kill tasks are scheduled.");
+      return params;
+    }
+
+    if (killAllDataSources) {
+      whitelist = segmentManager.getAllDatasourceNames();
+    }
 
     if (whitelist != null && whitelist.size() > 0 && (lastKillTime + period) < System.currentTimeMillis()) {
       lastKillTime = System.currentTimeMillis();
@@ -107,11 +122,7 @@ public class DruidCoordinatorSegmentKiller implements DruidCoordinatorHelper
   {
     List<Interval> unusedSegmentIntervals = segmentManager.getUnusedSegmentIntervals(
         dataSource,
-        new Interval(
-            0,
-            System.currentTimeMillis()
-            - retainDuration
-        ),
+        new Interval(DateTimes.EPOCH, DateTimes.nowUtc().minus(retainDuration)),
         limit
     );
 

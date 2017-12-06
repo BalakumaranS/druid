@@ -20,10 +20,10 @@ package io.druid.segment.data;
 
 import com.carrotsearch.junitbenchmarks.AbstractBenchmark;
 import com.carrotsearch.junitbenchmarks.BenchmarkOptions;
-import com.metamx.collections.bitmap.BitmapFactory;
-import com.metamx.collections.bitmap.ImmutableBitmap;
-import com.metamx.collections.bitmap.MutableBitmap;
-import com.metamx.common.logger.Logger;
+import io.druid.collections.bitmap.BitmapFactory;
+import io.druid.collections.bitmap.ImmutableBitmap;
+import io.druid.collections.bitmap.MutableBitmap;
+import io.druid.java.util.common.logger.Logger;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.Before;
@@ -61,14 +61,12 @@ public class BitmapCreationBenchmark extends AbstractBenchmark
   }
 
   final BitmapFactory factory;
-  final ObjectStrategy<ImmutableBitmap> objectStrategy;
 
   public BitmapCreationBenchmark(Class<? extends BitmapSerdeFactory> clazz)
       throws IllegalAccessException, InstantiationException
   {
     BitmapSerdeFactory serdeFactory = clazz.newInstance();
     factory = serdeFactory.getBitmapFactory();
-    objectStrategy = serdeFactory.getObjectStrategy();
   }
 
   private static final int numBits = 100000;

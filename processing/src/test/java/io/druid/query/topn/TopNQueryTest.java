@@ -23,7 +23,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
-import io.druid.jackson.DefaultObjectMapper;
 import io.druid.query.Query;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.DoubleMaxAggregatorFactory;
@@ -31,8 +30,10 @@ import io.druid.query.aggregation.DoubleMinAggregatorFactory;
 import io.druid.query.aggregation.PostAggregator;
 import io.druid.query.dimension.ExtractionDimensionSpec;
 import io.druid.query.dimension.LegacyDimensionSpec;
-import io.druid.query.extraction.LookupExtractionFn;
 import io.druid.query.extraction.MapLookupExtractor;
+import io.druid.query.lookup.LookupExtractionFn;
+import io.druid.query.ordering.StringComparators;
+import io.druid.segment.TestHelper;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -41,7 +42,7 @@ import java.util.Arrays;
 
 import static io.druid.query.QueryRunnerTestHelper.addRowsIndexConstant;
 import static io.druid.query.QueryRunnerTestHelper.allGran;
-import static io.druid.query.QueryRunnerTestHelper.commonAggregators;
+import static io.druid.query.QueryRunnerTestHelper.commonDoubleAggregators;
 import static io.druid.query.QueryRunnerTestHelper.dataSource;
 import static io.druid.query.QueryRunnerTestHelper.fullOnInterval;
 import static io.druid.query.QueryRunnerTestHelper.indexMetric;
@@ -50,7 +51,7 @@ import static io.druid.query.QueryRunnerTestHelper.rowsCount;
 
 public class TopNQueryTest
 {
-  private static final ObjectMapper jsonMapper = new DefaultObjectMapper();
+  private static final ObjectMapper jsonMapper = TestHelper.getJsonMapper();
 
   @Test
   public void testQuerySerialization() throws IOException
@@ -65,7 +66,7 @@ public class TopNQueryTest
         .aggregators(
             Lists.<AggregatorFactory>newArrayList(
                 Iterables.concat(
-                    commonAggregators,
+                    commonDoubleAggregators,
                     Lists.newArrayList(
                         new DoubleMaxAggregatorFactory("maxIndex", "index"),
                         new DoubleMinAggregatorFactory("minIndex", "index")
@@ -93,8 +94,7 @@ public class TopNQueryTest
             new ExtractionDimensionSpec(
                 marketDimension,
                 marketDimension,
-                new LookupExtractionFn(new MapLookupExtractor(ImmutableMap.of("foo", "bar"), false), true, null, false, false),
-                null
+                new LookupExtractionFn(new MapLookupExtractor(ImmutableMap.of("foo", "bar"), false), true, null, false, false)
             )
         )
         .metric(new NumericTopNMetricSpec(indexMetric))
@@ -103,7 +103,7 @@ public class TopNQueryTest
         .aggregators(
             Lists.<AggregatorFactory>newArrayList(
                 Iterables.concat(
-                    commonAggregators,
+                    commonDoubleAggregators,
                     Lists.newArrayList(
                         new DoubleMaxAggregatorFactory("maxIndex", "index"),
                         new DoubleMinAggregatorFactory("minIndex", "index")
@@ -123,7 +123,7 @@ public class TopNQueryTest
         .dataSource(dataSource)
         .granularity(allGran)
         .dimension(new LegacyDimensionSpec(marketDimension))
-        .metric(new AlphaNumericTopNMetricSpec(null))
+        .metric(new DimensionTopNMetricSpec(null, StringComparators.ALPHANUMERIC))
         .threshold(2)
         .intervals(fullOnInterval.getIntervals())
         .aggregators(Lists.<AggregatorFactory>newArrayList(rowsCount))
@@ -134,7 +134,8 @@ public class TopNQueryTest
                        + "  \"dimension\": \"market\",\n"
                        + "  \"threshold\": 2,\n"
                        + "  \"metric\": {\n"
-                       + "    \"type\": \"alphaNumeric\"\n"
+                       + "    \"type\": \"dimension\",\n"
+                       + "    \"ordering\": \"alphanumeric\"\n"
                        + "   },\n"
                        + "  \"granularity\": \"all\",\n"
                        + "  \"aggregations\": [\n"

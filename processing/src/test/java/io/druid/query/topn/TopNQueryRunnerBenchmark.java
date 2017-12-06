@@ -26,6 +26,7 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import io.druid.collections.StupidPool;
+import io.druid.query.QueryPlus;
 import io.druid.query.QueryRunner;
 import io.druid.query.QueryRunnerFactory;
 import io.druid.query.QueryRunnerTestHelper;
@@ -51,7 +52,7 @@ import java.util.Map;
 public class TopNQueryRunnerBenchmark extends AbstractBenchmark
 {
 
-  public static enum TestCases
+  public enum TestCases
   {
     rtIndex, mMappedTestIndex, mergedRealtimeIndex, rtIndexOffheap
   }
@@ -71,7 +72,7 @@ public class TopNQueryRunnerBenchmark extends AbstractBenchmark
       .aggregators(
           Lists.<AggregatorFactory>newArrayList(
               Iterables.concat(
-                  QueryRunnerTestHelper.commonAggregators,
+                  QueryRunnerTestHelper.commonDoubleAggregators,
                   Lists.newArrayList(
                       new DoubleMaxAggregatorFactory("maxIndex", "index"),
                       new DoubleMinAggregatorFactory("minIndex", "index")
@@ -88,6 +89,7 @@ public class TopNQueryRunnerBenchmark extends AbstractBenchmark
   {
     QueryRunnerFactory factory = new TopNQueryRunnerFactory(
         new StupidPool<ByteBuffer>(
+            "TopNQueryRunnerFactory-directBufferPool",
             new Supplier<ByteBuffer>()
             {
               @Override
@@ -106,21 +108,24 @@ public class TopNQueryRunnerBenchmark extends AbstractBenchmark
         TestCases.rtIndex,
         QueryRunnerTestHelper.makeQueryRunner(
             factory,
-            new IncrementalIndexSegment(TestIndex.getIncrementalTestIndex(), segmentId)
+            new IncrementalIndexSegment(TestIndex.getIncrementalTestIndex(), segmentId),
+            null
         )
     );
     testCaseMap.put(
         TestCases.mMappedTestIndex,
         QueryRunnerTestHelper.makeQueryRunner(
             factory,
-            new QueryableIndexSegment(segmentId, TestIndex.getMMappedTestIndex())
+            new QueryableIndexSegment(segmentId, TestIndex.getMMappedTestIndex()),
+            null
         )
     );
     testCaseMap.put(
         TestCases.mergedRealtimeIndex,
         QueryRunnerTestHelper.makeQueryRunner(
             factory,
-            new QueryableIndexSegment(segmentId, TestIndex.mergedRealtimeIndex())
+            new QueryableIndexSegment(segmentId, TestIndex.mergedRealtimeIndex()),
+            null
         )
     );
     //Thread.sleep(10000);
@@ -130,7 +135,7 @@ public class TopNQueryRunnerBenchmark extends AbstractBenchmark
   @Test
   public void testmMapped()
   {
-    testCaseMap.get(TestCases.mMappedTestIndex).run(query, context);
+    testCaseMap.get(TestCases.mMappedTestIndex).run(QueryPlus.wrap(query), context);
   }
 
   @Ignore
@@ -138,7 +143,7 @@ public class TopNQueryRunnerBenchmark extends AbstractBenchmark
   @Test
   public void testrtIndex()
   {
-    testCaseMap.get(TestCases.rtIndex).run(query, context);
+    testCaseMap.get(TestCases.rtIndex).run(QueryPlus.wrap(query), context);
   }
 
   @Ignore
@@ -146,7 +151,7 @@ public class TopNQueryRunnerBenchmark extends AbstractBenchmark
   @Test
   public void testMerged()
   {
-    testCaseMap.get(TestCases.mergedRealtimeIndex).run(query, context);
+    testCaseMap.get(TestCases.mergedRealtimeIndex).run(QueryPlus.wrap(query), context);
   }
 
   @Ignore
@@ -154,6 +159,6 @@ public class TopNQueryRunnerBenchmark extends AbstractBenchmark
   @Test
   public void testOffHeap()
   {
-    testCaseMap.get(TestCases.rtIndexOffheap).run(query, context);
+    testCaseMap.get(TestCases.rtIndexOffheap).run(QueryPlus.wrap(query), context);
   }
 }

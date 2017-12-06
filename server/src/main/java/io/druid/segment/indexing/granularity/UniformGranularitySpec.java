@@ -25,8 +25,8 @@ import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
-import com.metamx.common.Granularity;
-import io.druid.granularity.QueryGranularity;
+import io.druid.java.util.common.granularity.Granularities;
+import io.druid.java.util.common.granularity.Granularity;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
 
@@ -35,24 +35,26 @@ import java.util.SortedSet;
 
 public class UniformGranularitySpec implements GranularitySpec
 {
-  private static final Granularity DEFAULT_SEGMENT_GRANULARITY = Granularity.DAY;
-  private static final QueryGranularity DEFAULT_QUERY_GRANULARITY = QueryGranularity.NONE;
+  private static final Granularity DEFAULT_SEGMENT_GRANULARITY = Granularities.DAY;
+  private static final Granularity DEFAULT_QUERY_GRANULARITY = Granularities.NONE;
 
   private final Granularity segmentGranularity;
-  private final QueryGranularity queryGranularity;
+  private final Granularity queryGranularity;
+  private final Boolean rollup;
   private final List<Interval> inputIntervals;
   private final ArbitraryGranularitySpec wrappedSpec;
 
   @JsonCreator
   public UniformGranularitySpec(
       @JsonProperty("segmentGranularity") Granularity segmentGranularity,
-      @JsonProperty("queryGranularity") QueryGranularity queryGranularity,
+      @JsonProperty("queryGranularity") Granularity queryGranularity,
+      @JsonProperty("rollup") Boolean rollup,
       @JsonProperty("intervals") List<Interval> inputIntervals
-
   )
   {
-    this.segmentGranularity = segmentGranularity == null ? DEFAULT_SEGMENT_GRANULARITY : segmentGranularity;
     this.queryGranularity = queryGranularity == null ? DEFAULT_QUERY_GRANULARITY : queryGranularity;
+    this.rollup = rollup == null ? Boolean.TRUE : rollup;
+    this.segmentGranularity = segmentGranularity == null ? DEFAULT_SEGMENT_GRANULARITY : segmentGranularity;
 
     if (inputIntervals != null) {
       List<Interval> granularIntervals = Lists.newArrayList();
@@ -60,11 +62,20 @@ public class UniformGranularitySpec implements GranularitySpec
         Iterables.addAll(granularIntervals, this.segmentGranularity.getIterable(inputInterval));
       }
       this.inputIntervals = ImmutableList.copyOf(inputIntervals);
-      this.wrappedSpec = new ArbitraryGranularitySpec(queryGranularity, granularIntervals);
+      this.wrappedSpec = new ArbitraryGranularitySpec(queryGranularity, rollup, granularIntervals);
     } else {
       this.inputIntervals = null;
       this.wrappedSpec = null;
     }
+  }
+
+  public UniformGranularitySpec(
+      Granularity segmentGranularity,
+      Granularity queryGranularity,
+      List<Interval> inputIntervals
+  )
+  {
+    this(segmentGranularity, queryGranularity, true, inputIntervals);
   }
 
   @Override
@@ -78,9 +89,19 @@ public class UniformGranularitySpec implements GranularitySpec
   }
 
   @Override
+  public List<Interval> inputIntervals()
+  {
+    return inputIntervals == null ? ImmutableList.<Interval>of() : ImmutableList.copyOf(inputIntervals);
+  }
+
+  @Override
   public Optional<Interval> bucketInterval(DateTime dt)
   {
-    return wrappedSpec.bucketInterval(dt);
+    if (wrappedSpec == null) {
+      return Optional.absent();
+    } else {
+      return wrappedSpec.bucketInterval(dt);
+    }
   }
 
   @Override
@@ -91,8 +112,15 @@ public class UniformGranularitySpec implements GranularitySpec
   }
 
   @Override
+  @JsonProperty("rollup")
+  public boolean isRollup()
+  {
+    return rollup;
+  }
+
+  @Override
   @JsonProperty("queryGranularity")
-  public QueryGranularity getQueryGranularity()
+  public Granularity getQueryGranularity()
   {
     return queryGranularity;
   }
@@ -121,6 +149,10 @@ public class UniformGranularitySpec implements GranularitySpec
     if (!queryGranularity.equals(that.queryGranularity)) {
       return false;
     }
+    if (!rollup.equals(that.rollup)) {
+      return false;
+    }
+
     if (inputIntervals != null ? !inputIntervals.equals(that.inputIntervals) : that.inputIntervals != null) {
       return false;
     }
@@ -133,8 +165,27 @@ public class UniformGranularitySpec implements GranularitySpec
   {
     int result = segmentGranularity.hashCode();
     result = 31 * result + queryGranularity.hashCode();
+    result = 31 * result + rollup.hashCode();
     result = 31 * result + (inputIntervals != null ? inputIntervals.hashCode() : 0);
     result = 31 * result + (wrappedSpec != null ? wrappedSpec.hashCode() : 0);
     return result;
+  }
+
+  @Override
+  public String toString()
+  {
+    return "UniformGranularitySpec{" +
+           "segmentGranularity=" + segmentGranularity +
+           ", queryGranularity=" + queryGranularity +
+           ", rollup=" + rollup +
+           ", inputIntervals=" + inputIntervals +
+           ", wrappedSpec=" + wrappedSpec +
+           '}';
+  }
+
+  @Override
+  public GranularitySpec withIntervals(List<Interval> inputIntervals)
+  {
+    return new UniformGranularitySpec(segmentGranularity, queryGranularity, rollup, inputIntervals);
   }
 }

@@ -20,7 +20,8 @@
 package io.druid.query.topn;
 
 import com.google.common.collect.Lists;
-import io.druid.granularity.QueryGranularity;
+import io.druid.java.util.common.granularity.Granularities;
+import io.druid.java.util.common.granularity.Granularity;
 import io.druid.query.DataSource;
 import io.druid.query.TableDataSource;
 import io.druid.query.aggregation.AggregatorFactory;
@@ -28,23 +29,26 @@ import io.druid.query.aggregation.PostAggregator;
 import io.druid.query.dimension.DefaultDimensionSpec;
 import io.druid.query.dimension.DimensionSpec;
 import io.druid.query.filter.DimFilter;
-import io.druid.query.filter.OrDimFilter;
+import io.druid.query.filter.InDimFilter;
 import io.druid.query.filter.SelectorDimFilter;
 import io.druid.query.spec.LegacySegmentSpec;
 import io.druid.query.spec.QuerySegmentSpec;
+import io.druid.segment.VirtualColumn;
+import io.druid.segment.VirtualColumns;
 import org.joda.time.Interval;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
 /**
  * A Builder for TopNQuery.
- * 
+ *
  * Required: dataSource(), intervals(), metric() and threshold() must be called before build()
  * Additional requirement for numeric metric sorts: aggregators() must be called before build()
- * 
+ *
  * Optional: filters(), granularity(), postAggregators() and context() can be called before build()
- * 
+ *
  * Usage example:
  * <pre><code>
  *   TopNQuery query = new TopNQueryBuilder()
@@ -56,17 +60,18 @@ import java.util.Map;
  *                                  .build();
  * </code></pre>
  *
- * @see io.druid.query.topn.TopNQuery
+ * @see TopNQuery
  */
 public class TopNQueryBuilder
 {
   private DataSource dataSource;
+  private VirtualColumns virtualColumns;
   private DimensionSpec dimensionSpec;
   private TopNMetricSpec topNMetricSpec;
   private int threshold;
   private QuerySegmentSpec querySegmentSpec;
   private DimFilter dimFilter;
-  private QueryGranularity granularity;
+  private Granularity granularity;
   private List<AggregatorFactory> aggregatorSpecs;
   private List<PostAggregator> postAggregatorSpecs;
   private Map<String, Object> context;
@@ -74,71 +79,38 @@ public class TopNQueryBuilder
   public TopNQueryBuilder()
   {
     dataSource = null;
+    virtualColumns = null;
     dimensionSpec = null;
     topNMetricSpec = null;
     threshold = 0;
     querySegmentSpec = null;
     dimFilter = null;
-    granularity = QueryGranularity.ALL;
+    granularity = Granularities.ALL;
     aggregatorSpecs = Lists.newArrayList();
     postAggregatorSpecs = Lists.newArrayList();
     context = null;
   }
 
-  public DataSource getDataSource()
+  public TopNQueryBuilder(final TopNQuery query)
   {
-    return dataSource;
-  }
-
-  public DimensionSpec getDimensionSpec()
-  {
-    return dimensionSpec;
-  }
-
-  public TopNMetricSpec getTopNMetricSpec()
-  {
-    return topNMetricSpec;
-  }
-
-  public int getThreshold()
-  {
-    return threshold;
-  }
-
-  public QuerySegmentSpec getQuerySegmentSpec()
-  {
-    return querySegmentSpec;
-  }
-
-  public DimFilter getDimFilter()
-  {
-    return dimFilter;
-  }
-
-  public QueryGranularity getGranularity()
-  {
-    return granularity;
-  }
-
-  public List<AggregatorFactory> getAggregatorSpecs()
-  {
-    return aggregatorSpecs;
-  }
-
-  public List<PostAggregator> getPostAggregatorSpecs()
-  {
-    return postAggregatorSpecs;
-  }
-
-  public Map<String, Object> getContext()
-  {
-    return context;
+    this.dataSource = query.getDataSource();
+    this.virtualColumns = query.getVirtualColumns();
+    this.dimensionSpec = query.getDimensionSpec();
+    this.topNMetricSpec = query.getTopNMetricSpec();
+    this.threshold = query.getThreshold();
+    this.querySegmentSpec = query.getQuerySegmentSpec();
+    this.dimFilter = query.getDimensionsFilter();
+    this.granularity = query.getGranularity();
+    this.aggregatorSpecs = query.getAggregatorSpecs();
+    this.postAggregatorSpecs = query.getPostAggregatorSpecs();
+    this.context = query.getContext();
   }
 
   public TopNQuery build()
   {
     return new TopNQuery(
         dataSource,
+        virtualColumns,
         dimensionSpec,
         topNMetricSpec,
         threshold,
@@ -151,25 +123,18 @@ public class TopNQueryBuilder
     );
   }
 
+  @Deprecated
   public TopNQueryBuilder copy(TopNQuery query)
   {
-    return new TopNQueryBuilder()
-        .dataSource(query.getDataSource().toString())
-        .dimension(query.getDimensionSpec())
-        .metric(query.getTopNMetricSpec())
-        .threshold(query.getThreshold())
-        .intervals(query.getIntervals())
-        .filters(query.getDimensionsFilter())
-        .granularity(query.getGranularity())
-        .aggregators(query.getAggregatorSpecs())
-        .postAggregators(query.getPostAggregatorSpecs())
-        .context(query.getContext());
+    return new TopNQueryBuilder(query);
   }
 
+  @Deprecated
   public TopNQueryBuilder copy(TopNQueryBuilder builder)
   {
     return new TopNQueryBuilder()
         .dataSource(builder.dataSource)
+        .virtualColumns(builder.virtualColumns)
         .dimension(builder.dimensionSpec)
         .metric(builder.topNMetricSpec)
         .threshold(builder.threshold)
@@ -185,6 +150,17 @@ public class TopNQueryBuilder
   {
     dataSource = new TableDataSource(d);
     return this;
+  }
+
+  public TopNQueryBuilder virtualColumns(VirtualColumns virtualColumns)
+  {
+    this.virtualColumns = virtualColumns;
+    return this;
+  }
+
+  public TopNQueryBuilder virtualColumns(VirtualColumn... virtualColumns)
+  {
+    return virtualColumns(VirtualColumns.create(Arrays.asList(virtualColumns)));
   }
 
   public TopNQueryBuilder dataSource(DataSource d)
@@ -246,17 +222,13 @@ public class TopNQueryBuilder
 
   public TopNQueryBuilder filters(String dimensionName, String value)
   {
-    dimFilter = new SelectorDimFilter(dimensionName, value);
+    dimFilter = new SelectorDimFilter(dimensionName, value, null);
     return this;
   }
 
   public TopNQueryBuilder filters(String dimensionName, String value, String... values)
   {
-    List<DimFilter> fields = Lists.<DimFilter>newArrayList(new SelectorDimFilter(dimensionName, value));
-    for (String val : values) {
-      fields.add(new SelectorDimFilter(dimensionName, val));
-    }
-    dimFilter = new OrDimFilter(fields);
+    dimFilter = new InDimFilter(dimensionName, Lists.asList(value, values), null);
     return this;
   }
 
@@ -266,21 +238,16 @@ public class TopNQueryBuilder
     return this;
   }
 
-  public TopNQueryBuilder granularity(String g)
-  {
-    granularity = QueryGranularity.fromString(g);
-    return this;
-  }
-
-  public TopNQueryBuilder granularity(QueryGranularity g)
+  public TopNQueryBuilder granularity(Granularity g)
   {
     granularity = g;
     return this;
   }
 
-  public TopNQueryBuilder aggregators(List<AggregatorFactory> a)
+  @SuppressWarnings("unchecked")
+  public TopNQueryBuilder aggregators(List<? extends AggregatorFactory> a)
   {
-    aggregatorSpecs = a;
+    aggregatorSpecs = (List<AggregatorFactory>) a;
     return this;
   }
 
@@ -295,4 +262,5 @@ public class TopNQueryBuilder
     context = c;
     return this;
   }
+
 }

@@ -26,7 +26,7 @@ import com.google.common.util.concurrent.ListenableFutureTask;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
-import com.metamx.common.lifecycle.Lifecycle;
+import io.druid.java.util.common.lifecycle.Lifecycle;
 
 import javax.annotation.Nullable;
 import java.util.Comparator;
@@ -226,28 +226,6 @@ class PrioritizedListenableFutureTask<V> implements RunnableFuture<V>,
         }
       }
   );
-
-  public static <V> PrioritizedListenableFutureTask<V> create(
-      PrioritizedRunnable task,
-      @Nullable V result,
-      long position
-  )
-  {
-    return new PrioritizedListenableFutureTask<>(
-        ListenableFutureTask.create(task, result),
-        task.getPriority(),
-        position
-    );
-  }
-
-  public static <V> PrioritizedListenableFutureTask<?> create(PrioritizedCallable<V> callable, long position)
-  {
-    return new PrioritizedListenableFutureTask<>(
-        ListenableFutureTask.create(callable),
-        callable.getPriority(),
-        position
-    );
-  }
 
   public static <V> PrioritizedListenableFutureTask<V> create(ListenableFutureTask<V> task, int priority, long position)
   {

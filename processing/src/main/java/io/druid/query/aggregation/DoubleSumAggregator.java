@@ -21,7 +21,7 @@ package io.druid.query.aggregation;
 
 import com.google.common.collect.Ordering;
 import com.google.common.primitives.Doubles;
-import io.druid.segment.FloatColumnSelector;
+import io.druid.segment.BaseDoubleColumnValueSelector;
 
 import java.util.Comparator;
 
@@ -43,14 +43,12 @@ public class DoubleSumAggregator implements Aggregator
     return ((Number) lhs).doubleValue() + ((Number) rhs).doubleValue();
   }
 
-  private final FloatColumnSelector selector;
-  private final String name;
+  private final BaseDoubleColumnValueSelector selector;
 
   private double sum;
 
-  public DoubleSumAggregator(String name, FloatColumnSelector selector)
+  public DoubleSumAggregator(BaseDoubleColumnValueSelector selector)
   {
-    this.name = name;
     this.selector = selector;
 
     this.sum = 0;
@@ -59,7 +57,7 @@ public class DoubleSumAggregator implements Aggregator
   @Override
   public void aggregate()
   {
-    sum += selector.get();
+    sum += selector.getDouble();
   }
 
   @Override
@@ -87,20 +85,20 @@ public class DoubleSumAggregator implements Aggregator
   }
 
   @Override
-  public String getName()
-  {
-    return this.name;
-  }
-
-  @Override
   public Aggregator clone()
   {
-    return new DoubleSumAggregator(name, selector);
+    return new DoubleSumAggregator(selector);
   }
 
   @Override
   public void close()
   {
     // no resources to cleanup
+  }
+
+  @Override
+  public double getDouble()
+  {
+    return sum;
   }
 }

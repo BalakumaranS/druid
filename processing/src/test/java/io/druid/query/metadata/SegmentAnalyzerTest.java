@@ -20,15 +20,17 @@
 package io.druid.query.metadata;
 
 import com.google.common.collect.Lists;
-import com.metamx.common.guava.Sequences;
+import io.druid.data.input.impl.DimensionSchema;
+import io.druid.java.util.common.guava.Sequences;
 import io.druid.query.LegacyDataSource;
+import io.druid.query.QueryPlus;
 import io.druid.query.QueryRunner;
 import io.druid.query.QueryRunnerFactory;
 import io.druid.query.QueryRunnerTestHelper;
 import io.druid.query.metadata.metadata.ColumnAnalysis;
 import io.druid.query.metadata.metadata.SegmentAnalysis;
 import io.druid.query.metadata.metadata.SegmentMetadataQuery;
-import io.druid.query.spec.QuerySegmentSpecs;
+import io.druid.query.spec.LegacySegmentSpec;
 import io.druid.segment.IncrementalIndexSegment;
 import io.druid.segment.QueryableIndexSegment;
 import io.druid.segment.Segment;
@@ -71,31 +73,39 @@ public class SegmentAnalyzerTest
     final Map<String, ColumnAnalysis> columns = analysis.getColumns();
 
     Assert.assertEquals(
-        TestIndex.COLUMNS.length,
+        TestIndex.COLUMNS.length + 3,
         columns.size()
     ); // All columns including time and empty/null column
 
-    for (String dimension : TestIndex.DIMENSIONS) {
+    for (DimensionSchema schema : TestIndex.DIMENSION_SCHEMAS) {
+      final String dimension = schema.getName();
       final ColumnAnalysis columnAnalysis = columns.get(dimension);
+      final boolean isString = schema.getValueType().name().equals(ValueType.STRING.name());
 
-      Assert.assertEquals(dimension, ValueType.STRING.name(), columnAnalysis.getType());
-      if (analyses == null) {
-        Assert.assertTrue(dimension, columnAnalysis.getCardinality() > 0);
+      Assert.assertEquals(dimension, schema.getValueType().name(), columnAnalysis.getType());
+      Assert.assertEquals(dimension, 0, columnAnalysis.getSize());
+      if (isString) {
+        if (analyses == null) {
+          Assert.assertTrue(dimension, columnAnalysis.getCardinality() > 0);
+        } else {
+          Assert.assertEquals(dimension, 0, columnAnalysis.getCardinality().longValue());
+        }
       } else {
-        Assert.assertEquals(dimension, 0, columnAnalysis.getCardinality().longValue());
-        Assert.assertEquals(dimension, 0, columnAnalysis.getSize());
+        Assert.assertNull(dimension, columnAnalysis.getCardinality());
       }
     }
 
-    for (String metric : TestIndex.METRICS) {
+    for (String metric : TestIndex.DOUBLE_METRICS) {
       final ColumnAnalysis columnAnalysis = columns.get(metric);
+      Assert.assertEquals(metric, ValueType.DOUBLE.name(), columnAnalysis.getType());
+      Assert.assertEquals(metric, 0, columnAnalysis.getSize());
+      Assert.assertNull(metric, columnAnalysis.getCardinality());
+    }
 
+    for (String metric : TestIndex.FLOAT_METRICS) {
+      final ColumnAnalysis columnAnalysis = columns.get(metric);
       Assert.assertEquals(metric, ValueType.FLOAT.name(), columnAnalysis.getType());
-      if (analyses == null) {
-        Assert.assertTrue(metric, columnAnalysis.getSize() > 0);
-      } else {
-        Assert.assertEquals(metric, 0, columnAnalysis.getSize());
-      }
+      Assert.assertEquals(metric, 0, columnAnalysis.getSize());
       Assert.assertNull(metric, columnAnalysis.getCardinality());
     }
   }
@@ -121,35 +131,44 @@ public class SegmentAnalyzerTest
 
     final Map<String, ColumnAnalysis> columns = analysis.getColumns();
     Assert.assertEquals(
-        TestIndex.COLUMNS.length - 1,
+        TestIndex.COLUMNS.length + 3 - 1,
         columns.size()
     ); // All columns including time and excluding empty/null column
 
-    for (String dimension : TestIndex.DIMENSIONS) {
+    for (DimensionSchema schema : TestIndex.DIMENSION_SCHEMAS) {
+      final String dimension = schema.getName();
       final ColumnAnalysis columnAnalysis = columns.get(dimension);
       if (dimension.equals("null_column")) {
         Assert.assertNull(columnAnalysis);
       } else {
-        Assert.assertEquals(dimension, ValueType.STRING.name(), columnAnalysis.getType());
-        if (analyses == null) {
-          Assert.assertTrue(dimension, columnAnalysis.getSize() > 0);
-          Assert.assertTrue(dimension, columnAnalysis.getCardinality() > 0);
+        final boolean isString = schema.getValueType().name().equals(ValueType.STRING.name());
+        Assert.assertEquals(dimension, schema.getValueType().name(), columnAnalysis.getType());
+        Assert.assertEquals(dimension, 0, columnAnalysis.getSize());
+
+        if (isString) {
+          if (analyses == null) {
+            Assert.assertTrue(dimension, columnAnalysis.getCardinality() > 0);
+          } else {
+            Assert.assertEquals(dimension, 0, columnAnalysis.getCardinality().longValue());
+          }
         } else {
-          Assert.assertEquals(dimension, 0, columnAnalysis.getCardinality().longValue());
-          Assert.assertEquals(dimension, 0, columnAnalysis.getSize());
+          Assert.assertNull(dimension, columnAnalysis.getCardinality());
         }
       }
     }
 
-    for (String metric : TestIndex.METRICS) {
+    for (String metric : TestIndex.DOUBLE_METRICS) {
       final ColumnAnalysis columnAnalysis = columns.get(metric);
 
+      Assert.assertEquals(metric, ValueType.DOUBLE.name(), columnAnalysis.getType());
+      Assert.assertEquals(metric, 0, columnAnalysis.getSize());
+      Assert.assertNull(metric, columnAnalysis.getCardinality());
+    }
+
+    for (String metric : TestIndex.FLOAT_METRICS) {
+      final ColumnAnalysis columnAnalysis = columns.get(metric);
       Assert.assertEquals(metric, ValueType.FLOAT.name(), columnAnalysis.getType());
-      if (analyses == null) {
-        Assert.assertTrue(metric, columnAnalysis.getSize() > 0);
-      } else {
-        Assert.assertEquals(metric, 0, columnAnalysis.getSize());
-      }
+      Assert.assertEquals(metric, 0, columnAnalysis.getSize());
       Assert.assertNull(metric, columnAnalysis.getCardinality());
     }
   }
@@ -167,13 +186,15 @@ public class SegmentAnalyzerTest
         (QueryRunnerFactory) new SegmentMetadataQueryRunnerFactory(
             new SegmentMetadataQueryQueryToolChest(new SegmentMetadataQueryConfig()),
             QueryRunnerTestHelper.NOOP_QUERYWATCHER
-        ), index
+        ),
+        index,
+        null
     );
 
     final SegmentMetadataQuery query = new SegmentMetadataQuery(
-        new LegacyDataSource("test"), QuerySegmentSpecs.create("2011/2012"), null, null, null, analyses, false, false
+        new LegacyDataSource("test"), new LegacySegmentSpec("2011/2012"), null, null, null, analyses, false, false
     );
     HashMap<String, Object> context = new HashMap<String, Object>();
-    return Sequences.toList(query.run(runner, context), Lists.<SegmentAnalysis>newArrayList());
+    return Sequences.toList(runner.run(QueryPlus.wrap(query), context), Lists.<SegmentAnalysis>newArrayList());
   }
 }

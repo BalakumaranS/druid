@@ -19,68 +19,118 @@
 
 package io.druid.segment.filter;
 
-import com.google.common.base.Function;
+import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
-import com.metamx.collections.bitmap.ImmutableBitmap;
-import com.metamx.common.guava.FunctionalIterable;
+import io.druid.java.util.common.StringUtils;
+import io.druid.query.BitmapResultFactory;
+import io.druid.query.extraction.ExtractionFn;
 import io.druid.query.filter.BitmapIndexSelector;
+import io.druid.query.filter.DruidDoublePredicate;
+import io.druid.query.filter.DruidFloatPredicate;
+import io.druid.query.filter.DruidLongPredicate;
+import io.druid.query.filter.DruidPredicateFactory;
 import io.druid.query.filter.Filter;
 import io.druid.query.filter.ValueMatcher;
-import io.druid.query.filter.ValueMatcherFactory;
+import io.druid.segment.ColumnSelector;
 import io.druid.segment.ColumnSelectorFactory;
-import io.druid.segment.data.Indexed;
-
-import javax.annotation.Nullable;
 
 /**
  */
-class DimensionPredicateFilter implements Filter
+public class DimensionPredicateFilter implements Filter
 {
   private final String dimension;
-  private final Predicate<String> predicate;
+  private final DruidPredicateFactory predicateFactory;
+  private final String basePredicateString;
+  private final ExtractionFn extractionFn;
 
   public DimensionPredicateFilter(
-      String dimension,
-      Predicate<String> predicate
+      final String dimension,
+      final DruidPredicateFactory predicateFactory,
+      final ExtractionFn extractionFn
   )
   {
-    this.dimension = dimension;
-    this.predicate = predicate;
-  }
+    Preconditions.checkNotNull(predicateFactory, "predicateFactory");
+    this.dimension = Preconditions.checkNotNull(dimension, "dimension");
+    this.basePredicateString = predicateFactory.toString();
+    this.extractionFn = extractionFn;
 
-  @Override
-  public ImmutableBitmap getBitmapIndex(final BitmapIndexSelector selector)
-  {
-    Indexed<String> dimValues = selector.getDimensionValues(dimension);
-    if (dimValues == null || dimValues.size() == 0 || predicate == null) {
-      return selector.getBitmapFactory().makeEmptyImmutableBitmap();
+    if (extractionFn == null) {
+      this.predicateFactory = predicateFactory;
+    } else {
+      this.predicateFactory = new DruidPredicateFactory()
+      {
+        final Predicate<String> baseStringPredicate = predicateFactory.makeStringPredicate();
+
+        @Override
+        public Predicate<String> makeStringPredicate()
+        {
+          return input -> baseStringPredicate.apply(extractionFn.apply(input));
+        }
+
+        @Override
+        public DruidLongPredicate makeLongPredicate()
+        {
+          return input -> baseStringPredicate.apply(extractionFn.apply(input));
+        }
+
+        @Override
+        public DruidFloatPredicate makeFloatPredicate()
+        {
+          return input -> baseStringPredicate.apply(extractionFn.apply(input));
+        }
+
+        @Override
+        public DruidDoublePredicate makeDoublePredicate()
+        {
+          return input -> baseStringPredicate.apply(extractionFn.apply(input));
+        }
+      };
     }
-
-    return selector.getBitmapFactory().union(
-        FunctionalIterable.create(dimValues)
-                          .filter(predicate)
-                          .transform(
-                              new Function<String, ImmutableBitmap>()
-                              {
-                                @Override
-                                public ImmutableBitmap apply(@Nullable String input)
-                                {
-                                  return selector.getBitmapIndex(dimension, input);
-                                }
-                              }
-                          )
-    );
   }
 
   @Override
-  public ValueMatcher makeMatcher(ValueMatcherFactory factory)
+  public <T> T getBitmapResult(BitmapIndexSelector selector, BitmapResultFactory<T> bitmapResultFactory)
   {
-    return factory.makeValueMatcher(dimension, predicate);
+    return Filters.matchPredicate(dimension, selector, bitmapResultFactory, predicateFactory.makeStringPredicate());
   }
 
   @Override
   public ValueMatcher makeMatcher(ColumnSelectorFactory factory)
   {
-    throw new UnsupportedOperationException();
+    return Filters.makeValueMatcher(factory, dimension, predicateFactory);
+  }
+
+  @Override
+  public boolean supportsBitmapIndex(BitmapIndexSelector selector)
+  {
+    return selector.getBitmapIndex(dimension) != null;
+  }
+
+  @Override
+  public boolean supportsSelectivityEstimation(
+      ColumnSelector columnSelector, BitmapIndexSelector indexSelector
+  )
+  {
+    return Filters.supportsSelectivityEstimation(this, dimension, columnSelector, indexSelector);
+  }
+
+  @Override
+  public double estimateSelectivity(BitmapIndexSelector indexSelector)
+  {
+    return Filters.estimateSelectivity(
+        dimension,
+        indexSelector,
+        predicateFactory.makeStringPredicate()
+    );
+  }
+
+  @Override
+  public String toString()
+  {
+    if (extractionFn != null) {
+      return StringUtils.format("%s(%s) = %s", extractionFn, dimension, basePredicateString);
+    } else {
+      return StringUtils.format("%s = %s", dimension, basePredicateString);
+    }
   }
 }

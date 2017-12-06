@@ -23,8 +23,16 @@ Many of Druid's external dependencies can be plugged in as modules. Extensions c
 |--------|-----------|-------|
 |`druid.extensions.directory`|The root extension directory where user can put extensions related files. Druid will load extensions stored under this directory.|`extensions` (This is a relative path to Druid's working directory)|
 |`druid.extensions.hadoopDependenciesDir`|The root hadoop dependencies directory where user can put hadoop related dependencies files. Druid will load the dependencies based on the hadoop coordinate specified in the hadoop index task.|`hadoop-dependencies` (This is a relative path to Druid's working directory|
-|`druid.extensions.loadList`|A JSON array of extensions to load from extension directories by Druid. If it is not specified, its value will be `null` and Druid will load all the extensions under `druid.extensions.directory`. If its value is empty list `[]`, then no extensions will be loaded at all.|null|
+|`druid.extensions.loadList`|A JSON array of extensions to load from extension directories by Druid. If it is not specified, its value will be `null` and Druid will load all the extensions under `druid.extensions.directory`. If its value is empty list `[]`, then no extensions will be loaded at all. It is also allowed to specify absolute path of other custom extensions not stored in the common extensions directory.|null|
 |`druid.extensions.searchCurrentClassloader`|This is a boolean flag that determines if Druid will search the main classloader for extensions.  It defaults to true but can be turned off if you have reason to not automatically add all modules on the classpath.|true|
+|`druid.extensions.hadoopContainerDruidClasspath`|Hadoop Indexing launches hadoop jobs and this configuration provides way to explicitly set the user classpath for the hadoop job. By default this is computed automatically by druid based on the druid process classpath and set of extensions. However, sometimes you might want to be explicit to resolve dependency conflicts between druid and hadoop.|null|
+|`druid.extensions.addExtensionsToHadoopContainer`|Only applicable if `druid.extensions.hadoopContainerDruidClasspath` is provided. If set to true, then extensions specified in the loadList are added to hadoop container classpath. Note that when `druid.extensions.hadoopContainerDruidClasspath` is not provided then extensions are always added to hadoop container classpath.|false|
+
+### Modules
+
+|Property|Description|Default|
+|--------|-----------|-------|
+|`druid.modules.excludeList`|A JSON array of canonical class names (e. g. `"io.druid.somepackage.SomeModule"`) of module classes which shouldn't be loaded, even if they are found in extensions specified by `druid.extensions.loadList`, or in the list of core modules specified to be loaded on a particular Druid node type. Useful when some useful extension contains some module, which shouldn't be loaded on some Druid node type because some dependencies of that module couldn't be satisfied.|[]|
 
 ### Zookeeper
 We recommend just setting the base ZK path and the ZK service host, but all ZK paths that Druid uses can be overwritten to absolute paths.
@@ -63,7 +71,6 @@ The indexing service also uses its own set of paths. These configs can be includ
 |`druid.zk.paths.indexer.announcementsPath`|Middle managers announce themselves here.|`${druid.zk.paths.indexer.base}/announcements`|
 |`druid.zk.paths.indexer.tasksPath`|Used to assign tasks to middle managers.|`${druid.zk.paths.indexer.base}/tasks`|
 |`druid.zk.paths.indexer.statusPath`|Parent path for announcement of task statuses.|`${druid.zk.paths.indexer.base}/status`|
-|`druid.zk.paths.indexer.leaderLatchPath`|Used for Overlord leader election.|`${druid.zk.paths.indexer.base}/leaderLatchPath`|
 
 If `druid.zk.paths.base` and `druid.zk.paths.indexer.base` are both set, and none of the other `druid.zk.paths.*` or `druid.zk.paths.indexer.*` values are set, then the other properties will be evaluated relative to their respective `base`.
 For example, if `druid.zk.paths.base` is set to `/druid1` and `druid.zk.paths.indexer.base` is set to `/druid2` then `druid.zk.paths.announcementsPath` will default to `/druid1/announcements` while `druid.zk.paths.indexer.announcementsPath` will default to `/druid2/announcements`.
@@ -74,6 +81,23 @@ The following path is used for service discovery. It is **not** affected by `dru
 |--------|-----------|-------|
 |`druid.discovery.curator.path`|Services announce themselves under this ZooKeeper path.|`/druid/discovery`|
 
+### Exhibitor
+
+[Exhibitor](https://github.com/Netflix/exhibitor/wiki) is a supervisor system for ZooKeeper.
+Exhibitor can dynamically scale-up/down the cluster of ZooKeeper servers.
+Druid can update self-owned list of ZooKeeper servers through Exhibitor without restarting.
+That is, it allows Druid to keep the connections of Exhibitor-supervised ZooKeeper servers.
+
+|Property|Description|Default|
+|--------|-----------|-------|
+|`druid.exhibitor.service.hosts`|A JSON array which contains the hostnames of Exhibitor instances. Please specify this property if you want to use Exhibitor-supervised cluster.|none|
+|`druid.exhibitor.service.port`|The REST port used to connect to Exhibitor.|`8080`|
+|`druid.exhibitor.service.restUriPath`|The path of the REST call used to get the server set.|`/exhibitor/v1/cluster/list`|
+|`druid.exhibitor.service.useSsl`|Boolean flag for whether or not to use https protocol.|`false`|
+|`druid.exhibitor.service.pollingMs`|How ofter to poll the exhibitors for the list|`10000`|
+
+Note that `druid.zk.service.host` is used as a backup in case an Exhibitor instance can't be contacted and therefore should still be set.
+
 ### Startup Logging
 
 All nodes can log debugging information on startup.
@@ -81,6 +105,7 @@ All nodes can log debugging information on startup.
 |Property|Description|Default|
 |--------|-----------|-------|
 |`druid.startup.logging.logProperties`|Log all properties on startup (from common.runtime.properties, runtime.properties, and the JVM command line).|false|
+|`druid.startup.logging.maskProperties`|Masks sensitive properties (passwords, for example) containing theses words.|["password"]|
 
 Note that some sensitive information may be logged if these settings are enabled.
 
@@ -90,7 +115,7 @@ All nodes that can serve queries can also log the query requests they see.
 
 |Property|Description|Default|
 |--------|-----------|-------|
-|`druid.request.logging.type`|Choices: noop, file, emitter. How to log every query request.|noop|
+|`druid.request.logging.type`|Choices: noop, file, emitter, slf4j, filtered, composing. How to log every query request.|noop|
 
 Note that, you can enable sending all the HTTP requests to log by setting  "io.druid.jetty.RequestLog" to DEBUG level. See [Logging](../configuration/logging.html)
 
@@ -110,6 +135,44 @@ Every request is emitted to some external location.
 |--------|-----------|-------|
 |`druid.request.logging.feed`|Feed name for requests.|none|
 
+#### SLF4J Request Logging
+
+Every request is logged via SLF4J. Queries are serialized into JSON in the log message regardless of the SJF4J format specification. They will be logged under the class `io.druid.server.log.LoggingRequestLogger`.
+
+|Property|Description|Default|
+|--------|-----------|-------|
+|`druid.request.logging.setMDC`|If MDC entries should be set in the log entry. Your logging setup still has to be configured to handle MDC to format this data|false|
+|`druid.request.logging.setContextMDC`|If the druid query `context` should be added to the MDC entries. Has no effect unless `setMDC` is `true`|false|
+
+MDC fields populated with `setMDC`:
+
+|MDC field|Description|
+|---------|-----------|
+|`queryId`   |The query ID|
+|`dataSource`|The datasource the query was against|
+|`queryType` |The type of the query|
+|`hasFilters`|If the query has any filters|
+|`remoteAddr`|The remote address of the requesting client|
+|`duration`  |The duration of the query interval|
+|`resultOrdering`|The ordering of results|
+|`descending`|If the query is a descending query|
+
+#### Filtered Request Logging
+Filtered Request Logger filters requests based on a configurable query/time threshold. Only request logs where query/time is above the threshold are emitted.
+
+|Property|Description|Default|
+|--------|-----------|-------|
+|`druid.request.logging.queryTimeThresholdMs`|Threshold value for query/time in milliseconds.|0 i.e no filtering|
+|`druid.request.logging.delegate`|Delegate request logger to log requests.|none|
+
+#### Composite Request Logging
+Composite Request Logger emits request logs to multiple request loggers.
+
+|Property|Description|Default|
+|--------|-----------|-------|
+|`druid.request.logging.loggerProviders`|List of request loggers for emitting request logs.|none|
+
+
 ### Enabling Metrics
 
 Druid nodes periodically emit metrics and different metrics monitors can be included. Each node can overwrite the default list of monitors.
@@ -124,19 +187,24 @@ The following monitors are available:
 |Name|Description|
 |----|-----------|
 |`io.druid.client.cache.CacheMonitor`|Emits metrics (to logs) about the segment results cache for Historical and Broker nodes. Reports typical cache statistics include hits, misses, rates, and size (bytes and number of entries), as well as timeouts and and errors.|
-|`com.metamx.metrics.SysMonitor`|This uses the [SIGAR library](http://www.hyperic.com/products/sigar) to report on various system activities and statuses. Make sure to add the [sigar library jar](https://repository.jboss.org/nexus/content/repositories/thirdparty-uploads/org/hyperic/sigar/1.6.5.132/sigar-1.6.5.132.jar) to your classpath if using this monitor.|
+|`com.metamx.metrics.SysMonitor`|This uses the [SIGAR library](http://www.hyperic.com/products/sigar) to report on various system activities and statuses.|
 |`io.druid.server.metrics.HistoricalMetricsMonitor`|Reports statistics on Historical nodes.|
-|`com.metamx.metrics.JvmMonitor`|Reports JVM-related statistics.|
+|`com.metamx.metrics.JvmMonitor`|Reports various JVM-related statistics.|
+|`com.metamx.metrics.JvmCpuMonitor`|Reports statistics of CPU consumption by the JVM.|
+|`com.metamx.metrics.CpuAcctDeltaMonitor`|Reports consumed CPU as per the cpuacct cgroup.|
+|`com.metamx.metrics.JvmThreadsMonitor`|Reports Thread statistics in the JVM, like numbers of total, daemon, started, died threads.|
 |`io.druid.segment.realtime.RealtimeMetricsMonitor`|Reports statistics on Realtime nodes.|
 |`io.druid.server.metrics.EventReceiverFirehoseMonitor`|Reports how many events have been queued in the EventReceiverFirehose.|
+|`io.druid.server.metrics.QueryCountStatsMonitor`|Reports how many queries have been successful/failed/interrupted.|
+|`io.druid.server.emitter.HttpEmitterMonitor`|Reports internal metrics of `http` or `parametrized` emitter (see below). Must not be used with another emitter type. See the description of the metrics here: https://github.com/druid-io/druid/pull/4973.|
 
 ### Emitting Metrics
 
-The Druid servers emit various metrics and alerts via something we call an Emitter. There are three emitter implementations included with the code, a "noop" emitter, one that just logs to log4j ("logging", which is used by default if no emitter is specified) and one that does POSTs of JSON events to a server ("http"). The properties for using the logging emitter are described below.
+The Druid servers [emit various metrics](../operations/metrics.html) and alerts via something we call an Emitter. There are three emitter implementations included with the code, a "noop" emitter, one that just logs to log4j ("logging", which is used by default if no emitter is specified) and one that does POSTs of JSON events to a server ("http"). The properties for using the logging emitter are described below.
 
 |Property|Description|Default|
 |--------|-----------|-------|
-|`druid.emitter`|Setting this value to "noop", "logging", or "http" will initialize one of the emitter modules. value "composing" can be used to initialize multiple emitter modules. |noop|
+|`druid.emitter`|Setting this value to "noop", "logging", "http" or "parametrized" will initialize one of the emitter modules. value "composing" can be used to initialize multiple emitter modules. |noop|
 
 #### Logging Emitter Module
 
@@ -149,10 +217,27 @@ The Druid servers emit various metrics and alerts via something we call an Emitt
 
 |Property|Description|Default|
 |--------|-----------|-------|
-|`druid.emitter.http.timeOut`|The timeout for data reads.|PT5M|
 |`druid.emitter.http.flushMillis`|How often the internal message buffer is flushed (data is sent).|60000|
 |`druid.emitter.http.flushCount`|How many messages the internal message buffer can hold before flushing (sending).|500|
-|`druid.emitter.http.recipientBaseUrl`|The base URL to emit messages to. Druid will POST JSON to be consumed at the HTTP endpoint specified by this property.|none|
+|`druid.emitter.http.basicAuthentication`|Login and password for authentification in "login:password" form, e. g. `druid.emitter.http.basicAuthentication=admin:adminpassword`|not specified = no authentification|
+|`druid.emitter.http.flushTimeOut|The timeout after which an event should be sent to the endpoint, even if internal buffers are not filled, in milliseconds.|not specified = no timeout|
+|`druid.emitter.http.batchingStrategy`|The strategy of how the batch is formatted. "ARRAY" means `[event1,event2]`, "NEWLINES" means `event1\nevent2`, ONLY_EVENTS means `event1event2`.|ARRAY|
+|`druid.emitter.http.maxBatchSize`|The maximum batch size, in bytes.|5191680 (i. e. 5 MB)|
+|`druid.emitter.http.batchQueueSizeLimit`|The maximum number of batches in emitter queue, if there are problems with emitting.|50|
+|`druid.emitter.http.minHttpTimeoutMillis`|If the speed of filling batches imposes timeout smaller than that, not even trying to send batch to endpoint, because it will likely fail, not being able to send the data that fast. Configure this depending based on emitter/successfulSending/minTimeMs metric. Reasonable values are 10ms..100ms.|0|
+|`druid.emitter.http.recipientBaseUrl`|The base URL to emit messages to. Druid will POST JSON to be consumed at the HTTP endpoint specified by this property.|none, required config|
+
+#### Parametrized Http Emitter Module
+
+`druid.emitter.parametrized.httpEmitting.*` configs correspond to the configs of Http Emitter Modules, see above.
+Except `recipientBaseUrl`. E. g. `druid.emitter.parametrized.httpEmitting.flushMillis`,
+`druid.emitter.parametrized.httpEmitting.flushCount`, etc.
+
+The additional configs are:
+
+|Property|Description|Default|
+|--------|-----------|-------|
+|`druid.emitter.parametrized.recipientBaseUrlPattern`|The URL pattern to send an event to, based on the event's feed. E. g. `http://foo.bar/{feed}`, that will send event to `http://foo.bar/metrics` if the event's feed is "metrics".|none, required config|
 
 #### Composing Emitter Module
 
@@ -162,7 +247,7 @@ The Druid servers emit various metrics and alerts via something we call an Emitt
 
 #### Graphite Emitter
 
-To use graphite as emitter set `druid.emitter=graphite`. For configuration details please follow this [link](https://github.com/druid-io/druid/tree/master/extensions/graphite-emitter/README.md).
+To use graphite as emitter set `druid.emitter=graphite`. For configuration details please follow this [link](../development/extensions-contrib/graphite.html).
 
 
 ### Metadata Storage
@@ -174,7 +259,7 @@ These properties specify the jdbc connection and other configuration around the 
 |`druid.metadata.storage.type`|The type of metadata storage to use. Choose from "mysql", "postgresql", or "derby".|derby|
 |`druid.metadata.storage.connector.connectURI`|The jdbc uri for the database to connect to|none|
 |`druid.metadata.storage.connector.user`|The username to connect with.|none|
-|`druid.metadata.storage.connector.password`|The password to connect with.|none|
+|`druid.metadata.storage.connector.password`|The [Password Provider](../operations/password-provider.html) or String password used to connect with.|none|
 |`druid.metadata.storage.connector.createTables`|If Druid requires a table and it doesn't exist, create it?|true|
 |`druid.metadata.storage.tables.base`|The base name for tables.|druid|
 |`druid.metadata.storage.tables.segments`|The table to use to look for segments.|druid_segments|
@@ -183,6 +268,7 @@ These properties specify the jdbc connection and other configuration around the 
 |`druid.metadata.storage.tables.tasks`|Used by the indexing service to store tasks.|druid_tasks|
 |`druid.metadata.storage.tables.taskLog`|Used by the indexing service to store task logs.|druid_taskLog|
 |`druid.metadata.storage.tables.taskLock`|Used by the indexing service to store task locks.|druid_taskLock|
+|`druid.metadata.storage.tables.supervisors`|Used by the indexing service to store supervisor configurations.|druid_supervisors|
 |`druid.metadata.storage.tables.audit`|The table to use for audit history of configuration changes e.g. Coordinator rules.|druid_audit|
 
 ### Deep Storage
@@ -240,12 +326,12 @@ This deep storage is used to interface with Cassandra.
 
 You can enable caching of results at the broker, historical, or realtime level using following configurations.
 
-|Property|Description|Default|
-|--------|-----------|-------|
+|Property|Possible Values|Description|Default|
+|--------|---------------|-----------|-------|
 |`druid.cache.type`|`local`, `memcached`|The type of cache to use for queries.|`local`|
-|`druid.(broker|historical|realtime).cache.unCacheable`|All druid query types|All query types to not cache.|["groupBy", "select"]|
-|`druid.(broker|historical|realtime).cache.useCache`|Whether to use cache for getting query results.|false|
-|`druid.(broker|historical|realtime).cache.populateCache`|Whether to populate cache.|false|
+|<code>druid.(broker&#124;historical&#124;realtime).cache.unCacheable</code>|All druid query types|All query types to not cache.|["groupBy", "select"]|
+|<code>druid.(broker&#124;historical&#124;realtime).cache.useCache</code>|true, false|Whether to use cache for getting query results.|false|
+|<code>druid.(broker&#124;historical&#124;realtime).cache.populateCache</code>|true, false|Whether to populate cache.|false|
 
 #### Local Cache
 
@@ -261,7 +347,7 @@ You can enable caching of results at the broker, historical, or realtime level u
 |--------|-----------|-------|
 |`druid.cache.expiration`|Memcached [expiration time](https://code.google.com/p/memcached/wiki/NewCommands#Standard_Protocol).|2592000 (30 days)|
 |`druid.cache.timeout`|Maximum time in milliseconds to wait for a response from Memcached.|500|
-|`druid.cache.hosts`|Command separated list of Memcached hosts `<host:port>`.|none|
+|`druid.cache.hosts`|Comma separated list of Memcached hosts `<host:port>`.|none|
 |`druid.cache.maxObjectSize`|Maximum object size in bytes for a Memcached object.|52428800 (50 MB)|
 |`druid.cache.memcachedPrefix`|Key prefix for all keys in Memcached.|druid|
 
@@ -295,3 +381,29 @@ In current Druid, multiple data segments may be announced under the same Znode.
 |--------|-----------|-------|
 |`druid.announcer.segmentsPerNode`|Each Znode contains info for up to this many segments.|50|
 |`druid.announcer.maxBytesPerNode`|Max byte size for Znode.|524288|
+|`druid.announcer.skipDimensionsAndMetrics`|Skip Dimensions and Metrics list from segment announcements. NOTE: Enabling this will also remove the dimensions and metrics list from coordinator and broker endpoints.|false|
+|`druid.announcer.skipLoadSpec`|Skip segment LoadSpec from segment announcements. NOTE: Enabling this will also remove the loadspec from coordinator and broker endpoints.|false|
+
+### JavaScript
+
+Druid supports dynamic runtime extension through JavaScript functions. This functionality can be configured through
+the following properties.
+
+|Property|Description|Default|
+|--------|-----------|-------|
+|`druid.javascript.enabled`|Set to "true" to enable JavaScript functionality. This affects the JavaScript parser, filter, extractionFn, aggregator, post-aggregator, router strategy, and worker selection strategy.|false|
+
+<div class="note info">
+JavaScript-based functionality is disabled by default. Please refer to the Druid <a href="../development/javascript.html">JavaScript programming guide</a> for guidelines about using Druid's JavaScript functionality, including instructions on how to enable it.
+</div>
+
+### Double Column storage
+
+Druid's storage layer uses a 32-bit float representation to store columns created by the 
+doubleSum, doubleMin, and doubleMax aggregators at indexing time. To instead use 64-bit floats
+for these columns, please set the system-wide property `druid.indexing.doubleStorage=double`.
+This will become the default behavior in a future version of Druid.
+
+|Property|Description|Default|
+|--------|-----------|-------|
+|`druid.indexing.doubleStorage`|Set to "double" to use 64-bit double representation for double columns.|float|

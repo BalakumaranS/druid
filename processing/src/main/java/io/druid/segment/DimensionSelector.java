@@ -17,12 +17,24 @@
  * under the License.
  */
 
-package io.druid.segment;import io.druid.segment.data.IndexedInts;
+package io.druid.segment;
+
+import com.google.common.base.Predicate;
+import io.druid.guice.annotations.PublicApi;
+import io.druid.query.filter.ValueMatcher;
+import io.druid.query.monomorphicprocessing.CalledFromHotLoop;
+import io.druid.query.monomorphicprocessing.HotLoopCallee;
+import io.druid.segment.data.IndexedInts;
+
+import javax.annotation.Nullable;
 
 /**
  */
-public interface DimensionSelector
+@PublicApi
+public interface DimensionSelector extends ColumnValueSelector, HotLoopCallee
 {
+  int CARDINALITY_UNKNOWN = -1;
+
   /**
    * Gets all values for the row inside of an IntBuffer.  I.e. one possible implementation could be
    *
@@ -30,7 +42,15 @@ public interface DimensionSelector
    *
    * @return all values for the row as an IntBuffer
    */
-  public IndexedInts getRow();
+  @CalledFromHotLoop
+  IndexedInts getRow();
+
+  /**
+   * @param value nullable dimension value
+   */
+  ValueMatcher makeValueMatcher(@Nullable String value);
+
+  ValueMatcher makeValueMatcher(Predicate<String> predicate);
 
   /**
    * Value cardinality is the cardinality of the different occurring values.  If there were 4 rows:
@@ -42,9 +62,14 @@ public interface DimensionSelector
    *
    * Value cardinality would be 2.
    *
-   * @return the value cardinality
+   * Cardinality may be unknown (e.g. the selector used by IncrementalIndex while reading input rows),
+   * in which case this method will return -1. If cardinality is unknown, you should assume this
+   * dimension selector has no dictionary, and avoid storing ids, calling "lookupId", or calling "lookupName"
+   * outside of the context of operating on a single row.
+   *
+   * @return the value cardinality, or -1 if unknown.
    */
-  public int getValueCardinality();
+  int getValueCardinality();
 
   /**
    * The Name is the String name of the actual field.  It is assumed that storage layers convert names
@@ -70,13 +95,77 @@ public interface DimensionSelector
    * @param id id to lookup the field name for
    * @return the field name for the given id
    */
-  public String lookupName(int id);
+  @CalledFromHotLoop
+  @Nullable
+  String lookupName(int id);
 
   /**
-   * The ID is the int id value of the field.
+   * Returns true if it is possible to {@link #lookupName(int)} by ids from 0 to {@link #getValueCardinality()}
+   * before the rows with those ids are returned.
    *
-   * @param name field name to look up the id for
-   * @return the id for the given field name
+   * <p>Returns false if {@link #lookupName(int)} could be called with ids, returned from the most recent call of {@link
+   * #getRow()} on this DimensionSelector, but not earlier. If {@link #getValueCardinality()} of this DimensionSelector
+   * additionally returns {@link #CARDINALITY_UNKNOWN}, {@code lookupName()} couldn't be called with ids, returned by
+   * not the most recent call of {@link #getRow()}, i. e. names for ids couldn't be looked up "later". If {@link
+   * #getValueCardinality()} returns a non-negative number, {@code lookupName()} could be called with any ids, returned
+   * from {@code #getRow()} since the creation of this DimensionSelector.
+   *
+   * <p>If {@link #lookupName(int)} is called with an ineligible id, result is undefined: exception could be thrown, or
+   * null returned, or some other random value.
    */
-  public int lookupId(String name);
+  boolean nameLookupPossibleInAdvance();
+
+  /**
+   * Returns {@link IdLookup} if available for this DimensionSelector, or null.
+   */
+  @Nullable
+  IdLookup idLookup();
+
+  @Deprecated
+  @Override
+  default float getFloat()
+  {
+    // This is controversial, see https://github.com/druid-io/druid/issues/4888
+    return 0.0f;
+  }
+
+  @Deprecated
+  @Override
+  default double getDouble()
+  {
+    // This is controversial, see https://github.com/druid-io/druid/issues/4888
+    return 0.0;
+  }
+
+  @Deprecated
+  @Override
+  default long getLong()
+  {
+    // This is controversial, see https://github.com/druid-io/druid/issues/4888
+    return 0L;
+  }
+
+  /**
+   * Converts the current result of {@link #getRow()} into null, if the row is empty, a String, if the row has size 1,
+   * or a String[] array, if the row has size > 1, using {@link #lookupName(int)}.
+   *
+   * This method is not the default implementation of {@link #getObject()} to minimize the chance that implementations
+   * "forget" to override it with more optimized version.
+   */
+  @Nullable
+  default Object defaultGetObject()
+  {
+    IndexedInts row = getRow();
+    if (row.size() == 0) {
+      return null;
+    }
+    if (row.size() == 1) {
+      return lookupName(row.get(0));
+    }
+    final String[] strings = new String[row.size()];
+    for (int i = 0; i < row.size(); i++) {
+      strings[i] = lookupName(row.get(i));
+    }
+    return strings;
+  }
 }

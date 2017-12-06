@@ -30,27 +30,42 @@ import com.google.common.collect.Sets;
 import com.google.common.io.ByteSource;
 import com.google.common.util.concurrent.SettableFuture;
 import com.google.inject.Inject;
-import com.metamx.common.logger.Logger;
-
+import com.sun.jersey.spi.container.ResourceFilters;
+import io.druid.audit.AuditEntry;
 import io.druid.audit.AuditInfo;
 import io.druid.audit.AuditManager;
 import io.druid.common.config.JacksonConfigManager;
+import io.druid.indexing.common.TaskLocation;
 import io.druid.indexing.common.TaskStatus;
 import io.druid.indexing.common.actions.TaskActionClient;
 import io.druid.indexing.common.actions.TaskActionHolder;
 import io.druid.indexing.common.task.Task;
-import io.druid.indexing.overlord.RemoteTaskRunner;
 import io.druid.indexing.overlord.TaskMaster;
 import io.druid.indexing.overlord.TaskQueue;
 import io.druid.indexing.overlord.TaskRunner;
 import io.druid.indexing.overlord.TaskRunnerWorkItem;
 import io.druid.indexing.overlord.TaskStorageQueryAdapter;
+import io.druid.indexing.overlord.WorkerTaskRunner;
 import io.druid.indexing.overlord.autoscaling.ScalingStats;
+import io.druid.indexing.overlord.http.security.TaskResourceFilter;
 import io.druid.indexing.overlord.setup.WorkerBehaviorConfig;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.Intervals;
+import io.druid.java.util.common.StringUtils;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.metadata.EntryExistsException;
+import io.druid.server.http.security.ConfigResourceFilter;
+import io.druid.server.http.security.StateResourceFilter;
+import io.druid.server.security.Access;
+import io.druid.server.security.Action;
+import io.druid.server.security.AuthorizerMapper;
+import io.druid.server.security.AuthorizationUtils;
+import io.druid.server.security.ForbiddenException;
+import io.druid.server.security.Resource;
+import io.druid.server.security.ResourceAction;
+import io.druid.server.security.ResourceType;
 import io.druid.tasklogs.TaskLogStreamer;
 import io.druid.timeline.DataSegment;
-
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
 
@@ -64,11 +79,10 @@ import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
+import javax.ws.rs.WebApplicationException;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
-import javax.ws.rs.core.Response.Status;
-
 import java.io.IOException;
 import java.util.Collection;
 import java.util.List;
@@ -88,6 +102,7 @@ public class OverlordResource
   private final TaskLogStreamer taskLogStreamer;
   private final JacksonConfigManager configManager;
   private final AuditManager auditManager;
+  private final AuthorizerMapper authorizerMapper;
 
   private AtomicReference<WorkerBehaviorConfig> workerConfigRef = null;
 
@@ -97,7 +112,8 @@ public class OverlordResource
       TaskStorageQueryAdapter taskStorageQueryAdapter,
       TaskLogStreamer taskLogStreamer,
       JacksonConfigManager configManager,
-      AuditManager auditManager
+      AuditManager auditManager,
+      AuthorizerMapper authorizerMapper
   ) throws Exception
   {
     this.taskMaster = taskMaster;
@@ -105,14 +121,34 @@ public class OverlordResource
     this.taskLogStreamer = taskLogStreamer;
     this.configManager = configManager;
     this.auditManager = auditManager;
+    this.authorizerMapper = authorizerMapper;
   }
 
   @POST
   @Path("/task")
   @Consumes(MediaType.APPLICATION_JSON)
   @Produces(MediaType.APPLICATION_JSON)
-  public Response taskPost(final Task task)
+  public Response taskPost(
+      final Task task,
+      @Context final HttpServletRequest req
+  )
   {
+    final String dataSource = task.getDataSource();
+    final ResourceAction resourceAction = new ResourceAction(
+        new Resource(dataSource, ResourceType.DATASOURCE),
+        Action.WRITE
+    );
+
+    Access authResult = AuthorizationUtils.authorizeResourceAction(
+        req,
+        resourceAction,
+        authorizerMapper
+    );
+
+    if (!authResult.isAllowed()) {
+      throw new ForbiddenException(authResult.toString());
+    }
+
     return asLeaderWith(
         taskMaster.getTaskQueue(),
         new Function<TaskQueue, Response>()
@@ -126,7 +162,7 @@ public class OverlordResource
             }
             catch (EntryExistsException e) {
               return Response.status(Response.Status.BAD_REQUEST)
-                             .entity(ImmutableMap.of("error", String.format("Task[%s] already exists!", task.getId())))
+                             .entity(ImmutableMap.of("error", StringUtils.format("Task[%s] already exists!", task.getId())))
                              .build();
             }
           }
@@ -136,15 +172,34 @@ public class OverlordResource
 
   @GET
   @Path("/leader")
+  @ResourceFilters(StateResourceFilter.class)
   @Produces(MediaType.APPLICATION_JSON)
   public Response getLeader()
   {
-    return Response.ok(taskMaster.getLeader()).build();
+    return Response.ok(taskMaster.getCurrentLeader()).build();
+  }
+
+  /**
+   * This is an unsecured endpoint, defined as such in UNSECURED_PATHS in CliOverlord
+   */
+  @GET
+  @Path("/isLeader")
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response isLeader()
+  {
+    final boolean leading = taskMaster.isLeader();
+    final Map<String, Boolean> response = ImmutableMap.of("leader", leading);
+    if (leading) {
+      return Response.ok(response).build();
+    } else {
+      return Response.status(Response.Status.NOT_FOUND).entity(response).build();
+    }
   }
 
   @GET
   @Path("/task/{taskid}")
   @Produces(MediaType.APPLICATION_JSON)
+  @ResourceFilters(TaskResourceFilter.class)
   public Response getTaskPayload(@PathParam("taskid") String taskid)
   {
     return optionalTaskResponse(taskid, "payload", taskStorageQueryAdapter.getTask(taskid));
@@ -153,6 +208,7 @@ public class OverlordResource
   @GET
   @Path("/task/{taskid}/status")
   @Produces(MediaType.APPLICATION_JSON)
+  @ResourceFilters(TaskResourceFilter.class)
   public Response getTaskStatus(@PathParam("taskid") String taskid)
   {
     return optionalTaskResponse(taskid, "status", taskStorageQueryAdapter.getStatus(taskid));
@@ -161,6 +217,7 @@ public class OverlordResource
   @GET
   @Path("/task/{taskid}/segments")
   @Produces(MediaType.APPLICATION_JSON)
+  @ResourceFilters(TaskResourceFilter.class)
   public Response getTaskSegments(@PathParam("taskid") String taskid)
   {
     final Set<DataSegment> segments = taskStorageQueryAdapter.getInsertedSegments(taskid);
@@ -170,6 +227,7 @@ public class OverlordResource
   @POST
   @Path("/task/{taskid}/shutdown")
   @Produces(MediaType.APPLICATION_JSON)
+  @ResourceFilters(TaskResourceFilter.class)
   public Response doShutdown(@PathParam("taskid") final String taskid)
   {
     return asLeaderWith(
@@ -189,6 +247,7 @@ public class OverlordResource
   @GET
   @Path("/worker")
   @Produces(MediaType.APPLICATION_JSON)
+  @ResourceFilters(ConfigResourceFilter.class)
   public Response getWorkerConfig()
   {
     if (workerConfigRef == null) {
@@ -202,11 +261,12 @@ public class OverlordResource
   @POST
   @Path("/worker")
   @Consumes(MediaType.APPLICATION_JSON)
+  @ResourceFilters(ConfigResourceFilter.class)
   public Response setWorkerConfig(
       final WorkerBehaviorConfig workerBehaviorConfig,
       @HeaderParam(AuditManager.X_DRUID_AUTHOR) @DefaultValue("") final String author,
       @HeaderParam(AuditManager.X_DRUID_COMMENT) @DefaultValue("") final String comment,
-      @Context HttpServletRequest req
+      @Context final HttpServletRequest req
   )
   {
     if (!configManager.set(
@@ -225,22 +285,21 @@ public class OverlordResource
   @GET
   @Path("/worker/history")
   @Produces(MediaType.APPLICATION_JSON)
+  @ResourceFilters(ConfigResourceFilter.class)
   public Response getWorkerConfigHistory(
       @QueryParam("interval") final String interval,
       @QueryParam("count") final Integer count
   )
   {
-    Interval theInterval = interval == null ? null : new Interval(interval);
+    Interval theInterval = interval == null ? null : Intervals.of(interval);
     if (theInterval == null && count != null) {
       try {
-        return Response.ok(
-            auditManager.fetchAuditHistory(
-                WorkerBehaviorConfig.CONFIG_KEY,
-                WorkerBehaviorConfig.CONFIG_KEY,
-                count
-            )
-        )
-                       .build();
+        List<AuditEntry> workerEntryList = auditManager.fetchAuditHistory(
+            WorkerBehaviorConfig.CONFIG_KEY,
+            WorkerBehaviorConfig.CONFIG_KEY,
+            count
+        );
+        return Response.ok(workerEntryList).build();
       }
       catch (IllegalArgumentException e) {
         return Response.status(Response.Status.BAD_REQUEST)
@@ -248,20 +307,19 @@ public class OverlordResource
                        .build();
       }
     }
-    return Response.ok(
-        auditManager.fetchAuditHistory(
-            WorkerBehaviorConfig.CONFIG_KEY,
-            WorkerBehaviorConfig.CONFIG_KEY,
-            theInterval
-        )
-    )
-                   .build();
+    List<AuditEntry> workerEntryList = auditManager.fetchAuditHistory(
+        WorkerBehaviorConfig.CONFIG_KEY,
+        WorkerBehaviorConfig.CONFIG_KEY,
+        theInterval
+    );
+    return Response.ok(workerEntryList).build();
   }
 
   @POST
   @Path("/action")
   @Produces(MediaType.APPLICATION_JSON)
-  public <T> Response doAction(final TaskActionHolder<T> holder)
+  @ResourceFilters(StateResourceFilter.class)
+  public Response doAction(final TaskActionHolder holder)
   {
     return asLeaderWith(
         taskMaster.getTaskActionClient(holder.getTask()),
@@ -277,7 +335,7 @@ public class OverlordResource
             // or token that gets passed around.
 
             try {
-              final T ret = taskActionClient.submit(holder.getAction());
+              final Object ret = taskActionClient.submit(holder.getAction());
               retMap = Maps.newHashMap();
               retMap.put("result", ret);
             }
@@ -295,7 +353,7 @@ public class OverlordResource
   @GET
   @Path("/waitingTasks")
   @Produces(MediaType.APPLICATION_JSON)
-  public Response getWaitingTasks()
+  public Response getWaitingTasks(@Context final HttpServletRequest req)
   {
     return workItemsResponse(
         new Function<TaskRunner, Collection<? extends TaskRunnerWorkItem>>()
@@ -305,7 +363,25 @@ public class OverlordResource
           {
             // A bit roundabout, but works as a way of figuring out what tasks haven't been handed
             // off to the runner yet:
-            final List<Task> activeTasks = taskStorageQueryAdapter.getActiveTasks();
+            final List<Task> allActiveTasks = taskStorageQueryAdapter.getActiveTasks();
+            Function<Task, Iterable<ResourceAction>> raGenerator = task -> {
+              return Lists.newArrayList(
+                  new ResourceAction(
+                      new Resource(task.getDataSource(), ResourceType.DATASOURCE),
+                      Action.READ
+                  )
+              );
+            };
+
+            final List<Task> activeTasks = Lists.newArrayList(
+                AuthorizationUtils.filterAuthorizedResources(
+                    req,
+                    allActiveTasks,
+                    raGenerator,
+                    authorizerMapper
+                )
+            );
+
             final Set<String> runnersKnownTasks = Sets.newHashSet(
                 Iterables.transform(
                     taskRunner.getKnownTasks(),
@@ -327,9 +403,16 @@ public class OverlordResource
                     new TaskRunnerWorkItem(
                         task.getId(),
                         SettableFuture.<TaskStatus>create(),
-                        new DateTime(0),
-                        new DateTime(0)
+                        DateTimes.EPOCH,
+                        DateTimes.EPOCH
                     )
+                    {
+                      @Override
+                      public TaskLocation getLocation()
+                      {
+                        return TaskLocation.unknown();
+                      }
+                    }
                 );
               }
             }
@@ -342,7 +425,7 @@ public class OverlordResource
   @GET
   @Path("/pendingTasks")
   @Produces(MediaType.APPLICATION_JSON)
-  public Response getPendingTasks()
+  public Response getPendingTasks(@Context final HttpServletRequest req)
   {
     return workItemsResponse(
         new Function<TaskRunner, Collection<? extends TaskRunnerWorkItem>>()
@@ -350,7 +433,7 @@ public class OverlordResource
           @Override
           public Collection<? extends TaskRunnerWorkItem> apply(TaskRunner taskRunner)
           {
-            return taskRunner.getPendingTasks();
+            return securedTaskRunnerWorkItem(taskRunner.getPendingTasks(), req);
           }
         }
     );
@@ -359,7 +442,7 @@ public class OverlordResource
   @GET
   @Path("/runningTasks")
   @Produces(MediaType.APPLICATION_JSON)
-  public Response getRunningTasks()
+  public Response getRunningTasks(@Context final HttpServletRequest req)
   {
     return workItemsResponse(
         new Function<TaskRunner, Collection<? extends TaskRunnerWorkItem>>()
@@ -367,7 +450,7 @@ public class OverlordResource
           @Override
           public Collection<? extends TaskRunnerWorkItem> apply(TaskRunner taskRunner)
           {
-            return taskRunner.getRunningTasks();
+            return securedTaskRunnerWorkItem(taskRunner.getRunningTasks(), req);
           }
         }
     );
@@ -376,10 +459,38 @@ public class OverlordResource
   @GET
   @Path("/completeTasks")
   @Produces(MediaType.APPLICATION_JSON)
-  public Response getCompleteTasks()
+  public Response getCompleteTasks(@Context final HttpServletRequest req)
   {
+    Function<TaskStatus, Iterable<ResourceAction>> raGenerator = taskStatus -> {
+      final String taskId = taskStatus.getId();
+      final Optional<Task> optionalTask = taskStorageQueryAdapter.getTask(taskId);
+      if (!optionalTask.isPresent()) {
+        throw new WebApplicationException(
+            Response.serverError().entity(
+                StringUtils.format("No task information found for task with id: [%s]", taskId)
+            ).build()
+        );
+      }
+
+      return Lists.newArrayList(
+          new ResourceAction(
+              new Resource(optionalTask.get().getDataSource(), ResourceType.DATASOURCE),
+              Action.READ
+          )
+      );
+    };
+
+    final List<TaskStatus> recentlyFinishedTasks = Lists.newArrayList(
+        AuthorizationUtils.filterAuthorizedResources(
+            req,
+            taskStorageQueryAdapter.getRecentlyFinishedTaskStatuses(),
+            raGenerator,
+            authorizerMapper
+        )
+    );
+
     final List<TaskResponseObject> completeTasks = Lists.transform(
-        taskStorageQueryAdapter.getRecentlyFinishedTaskStatuses(),
+        recentlyFinishedTasks,
         new Function<TaskStatus, TaskResponseObject>()
         {
           @Override
@@ -388,9 +499,10 @@ public class OverlordResource
             // Would be nice to include the real created date, but the TaskStorage API doesn't yet allow it.
             return new TaskResponseObject(
                 taskStatus.getId(),
-                new DateTime(0),
-                new DateTime(0),
-                Optional.of(taskStatus)
+                DateTimes.EPOCH,
+                DateTimes.EPOCH,
+                Optional.of(taskStatus),
+                TaskLocation.unknown()
             );
           }
         }
@@ -401,6 +513,7 @@ public class OverlordResource
   @GET
   @Path("/workers")
   @Produces(MediaType.APPLICATION_JSON)
+  @ResourceFilters(StateResourceFilter.class)
   public Response getWorkers()
   {
     return asLeaderWith(
@@ -410,8 +523,8 @@ public class OverlordResource
           @Override
           public Response apply(TaskRunner taskRunner)
           {
-            if (taskRunner instanceof RemoteTaskRunner) {
-              return Response.ok(((RemoteTaskRunner) taskRunner).getWorkers()).build();
+            if (taskRunner instanceof WorkerTaskRunner) {
+              return Response.ok(((WorkerTaskRunner) taskRunner).getWorkers()).build();
             } else {
               log.debug(
                   "Task runner [%s] of type [%s] does not support listing workers",
@@ -430,6 +543,7 @@ public class OverlordResource
   @GET
   @Path("/scaling")
   @Produces(MediaType.APPLICATION_JSON)
+  @ResourceFilters(StateResourceFilter.class)
   public Response getScalingState()
   {
     // Don't use asLeaderWith, since we want to return 200 instead of 503 when missing an autoscaler.
@@ -444,6 +558,7 @@ public class OverlordResource
   @GET
   @Path("/task/{taskid}/log")
   @Produces("text/plain")
+  @ResourceFilters(TaskResourceFilter.class)
   public Response doGetLog(
       @PathParam("taskid") final String taskid,
       @QueryParam("offset") @DefaultValue("0") final long offset
@@ -489,7 +604,8 @@ public class OverlordResource
                             workItem.getTaskId(),
                             workItem.getCreatedTime(),
                             workItem.getQueueInsertionTime(),
-                            Optional.<TaskStatus>absent()
+                            Optional.<TaskStatus>absent(),
+                            workItem.getLocation()
                         );
                       }
                     }
@@ -522,44 +638,61 @@ public class OverlordResource
     }
   }
 
-  private static class TaskResponseObject
+  private Collection<? extends TaskRunnerWorkItem> securedTaskRunnerWorkItem(
+      Collection<? extends TaskRunnerWorkItem> collectionToFilter,
+      HttpServletRequest req
+  )
+  {
+    Function<TaskRunnerWorkItem, Iterable<ResourceAction>> raGenerator = taskRunnerWorkItem -> {
+      final String taskId = taskRunnerWorkItem.getTaskId();
+      final Optional<Task> optionalTask = taskStorageQueryAdapter.getTask(taskId);
+      if (!optionalTask.isPresent()) {
+        throw new WebApplicationException(
+            Response.serverError().entity(
+                StringUtils.format("No task information found for task with id: [%s]", taskId)
+            ).build()
+        );
+      }
+
+      return Lists.newArrayList(
+          new ResourceAction(
+              new Resource(optionalTask.get().getDataSource(), ResourceType.DATASOURCE),
+              Action.READ
+          )
+      );
+    };
+
+    return Lists.newArrayList(
+        AuthorizationUtils.filterAuthorizedResources(
+            req,
+            collectionToFilter,
+            raGenerator,
+            authorizerMapper
+        )
+    );
+  }
+
+  static class TaskResponseObject
   {
     private final String id;
     private final DateTime createdTime;
     private final DateTime queueInsertionTime;
     private final Optional<TaskStatus> status;
+    private final TaskLocation location;
 
     private TaskResponseObject(
         String id,
         DateTime createdTime,
         DateTime queueInsertionTime,
-        Optional<TaskStatus> status
+        Optional<TaskStatus> status,
+        TaskLocation location
     )
     {
       this.id = id;
       this.createdTime = createdTime;
       this.queueInsertionTime = queueInsertionTime;
       this.status = status;
-    }
-
-    public String getId()
-    {
-      return id;
-    }
-
-    public DateTime getCreatedTime()
-    {
-      return createdTime;
-    }
-
-    public DateTime getQueueInsertionTime()
-    {
-      return queueInsertionTime;
-    }
-
-    public Optional<TaskStatus> getStatus()
-    {
-      return status;
+      this.location = location;
     }
 
     @JsonValue
@@ -578,6 +711,9 @@ public class OverlordResource
         if (status.get().isComplete()) {
           data.put("duration", status.get().getDuration());
         }
+      }
+      if (location != null) {
+        data.put("location", location);
       }
       return data;
     }

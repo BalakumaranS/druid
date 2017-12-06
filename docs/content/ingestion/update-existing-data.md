@@ -28,7 +28,7 @@ segments and avoid the overhead of rebuilding new segments with reindexing, you 
 ### Reindexing and Delta Ingestion with Hadoop Batch Ingestion
 
 This section assumes the reader understands how to do batch ingestion using Hadoop. See 
-[batch-ingestion](batch-ingestion.md) for more information. Hadoop batch-ingestion can be used for reindexing and delta ingestion.
+[batch-ingestion](batch-ingestion.html) for more information. Hadoop batch-ingestion can be used for reindexing and delta ingestion.
 
 Druid uses an `inputSpec` in the `ioConfig` to know where the data to be ingested is located and how to read it. 
 For simple Hadoop batch ingestion, `static` or `granularity` spec types allow you to read data stored in deep storage.
@@ -43,7 +43,7 @@ This is a type of `inputSpec` that reads data already stored inside Druid.
 |-----|----|-----------|--------|
 |type|String.|This should always be 'dataSource'.|yes|
 |ingestionSpec|JSON object.|Specification of Druid segments to be loaded. See below.|yes|
-|maxSplitSize|Number|Enables combining multiple segments into single Hadoop InputSplit according to size of segments. Default is none. |no|
+|maxSplitSize|Number|Enables combining multiple segments into single Hadoop InputSplit according to size of segments. With -1, druid calculates max split size based on user specified number of map task(mapred.map.tasks or mapreduce.job.maps). By default, one split is made for one segment. |no|
 
 Here is what goes inside `ingestionSpec`:
 
@@ -51,7 +51,7 @@ Here is what goes inside `ingestionSpec`:
 |-----|----|-----------|--------|
 |dataSource|String|Druid dataSource name from which you are loading the data.|yes|
 |intervals|List|A list of strings representing ISO-8601 Intervals.|yes|
-|granularity|String|Defines the granularity of the query while loading data. Default value is "none". See [Granularities](../querying/granularities.html).|no|
+|segments|List|List of segments from which to read data from, by default it is obtained automatically. You can obtain list of segments to put here by making a POST query to coordinator at url /druid/coordinator/v1/metadata/datasources/segments?full with list of intervals specified in the request paylod e.g. ["2012-01-01T00:00:00.000/2012-01-03T00:00:00.000", "2012-01-05T00:00:00.000/2012-01-07T00:00:00.000"]. You may want to provide this list manually in order to ensure that segments read are exactly same as they were at the time of task submission, task would fail if the list provided by the user does not match with state of database when the task actually runs.|no|
 |filter|JSON|See [Filters](../querying/filters.html)|no|
 |dimensions|Array of String|Name of dimension columns to load. By default, the list will be constructed from parseSpec. If parseSpec does not have an explicit list of dimensions then all the dimension columns present in stored data will be read.|no|
 |metrics|Array of String|Name of metric columns to load. By default, the list will be constructed from the "name" of all the configured aggregators.|no|
@@ -75,8 +75,7 @@ For example
 
 #### `multi`
 
-This is a composing inputSpec to combine other inputSpecs. This inputSpec is used for delta ingestion. 
-Please note that delta ingestion is not an idempotent operation. We may add change things in future to make it idempotent.
+This is a composing inputSpec to combine other inputSpecs. This inputSpec is used for delta ingestion. Please note that you can have only one `dataSource` as child of `multi` inputSpec.
 
 |Field|Type|Description|Required|
 |-----|----|-----------|--------|
@@ -94,7 +93,26 @@ For example:
         "type" : "dataSource",
         "ingestionSpec" : {
           "dataSource": "wikipedia",
-          "intervals": ["2014-10-20T00:00:00Z/P2W"]
+          "intervals": ["2012-01-01T00:00:00.000/2012-01-03T00:00:00.000", "2012-01-05T00:00:00.000/2012-01-07T00:00:00.000"],
+          "segments": [
+            {
+              "dataSource": "test1",
+              "interval": "2012-01-01T00:00:00.000/2012-01-03T00:00:00.000",
+              "version": "v2",
+              "loadSpec": {
+                "type": "local",
+                "path": "/tmp/index1.zip"
+              },
+              "dimensions": "host",
+              "metrics": "visited_sum,unique_hosts",
+              "shardSpec": {
+                "type": "none"
+              },
+              "binaryVersion": 9,
+              "size": 2,
+              "identifier": "test1_2000-01-01T00:00:00.000Z_3000-01-01T00:00:00.000Z_v2"
+            }
+          ]
         }
       },
       {
@@ -106,6 +124,11 @@ For example:
   ...
 }
 ```
+
+It is STRONGLY RECOMMENDED to provide list of segments in `dataSource` inputSpec explicitly so that your delta ingestion task is idempotent. You can obtain that list of segments by making following call to the coordinator.
+POST `/druid/coordinator/v1/metadata/datasources/{dataSourceName}/segments?full`
+Request Body: [interval1, interval2,...] for example ["2012-01-01T00:00:00.000/2012-01-03T00:00:00.000", "2012-01-05T00:00:00.000/2012-01-07T00:00:00.000"]
+
 
 ### Reindexing without Hadoop Batch Ingestion
 

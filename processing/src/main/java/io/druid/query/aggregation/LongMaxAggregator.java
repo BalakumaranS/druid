@@ -19,7 +19,7 @@
 
 package io.druid.query.aggregation;
 
-import io.druid.segment.LongColumnSelector;
+import io.druid.segment.BaseLongColumnValueSelector;
 
 import java.util.Comparator;
 
@@ -34,14 +34,12 @@ public class LongMaxAggregator implements Aggregator
     return Math.max(((Number) lhs).longValue(), ((Number) rhs).longValue());
   }
 
-  private final LongColumnSelector selector;
-  private final String name;
+  private final BaseLongColumnValueSelector selector;
 
   private long max;
 
-  public LongMaxAggregator(String name, LongColumnSelector selector)
+  public LongMaxAggregator(BaseLongColumnValueSelector selector)
   {
-    this.name = name;
     this.selector = selector;
 
     reset();
@@ -50,7 +48,7 @@ public class LongMaxAggregator implements Aggregator
   @Override
   public void aggregate()
   {
-    max = Math.max(max, selector.get());
+    max = Math.max(max, selector.getLong());
   }
 
   @Override
@@ -78,15 +76,15 @@ public class LongMaxAggregator implements Aggregator
   }
 
   @Override
-  public String getName()
+  public double getDouble()
   {
-    return this.name;
+    return (double) max;
   }
 
   @Override
   public Aggregator clone()
   {
-    return new LongMaxAggregator(name, selector);
+    return new LongMaxAggregator(selector);
   }
 
   @Override

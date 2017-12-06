@@ -31,12 +31,17 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
-import com.metamx.common.guava.Sequences;
 import io.druid.data.input.InputRow;
 import io.druid.data.input.MapBasedInputRow;
-import io.druid.granularity.QueryGranularity;
+import io.druid.java.util.common.Intervals;
+import io.druid.java.util.common.StringUtils;
+import io.druid.java.util.common.granularity.Granularities;
+import io.druid.java.util.common.granularity.Granularity;
+import io.druid.java.util.common.guava.Sequences;
+import io.druid.java.util.common.parsers.ParseException;
 import io.druid.query.Druids;
 import io.druid.query.FinalizeResultsQueryRunner;
+import io.druid.query.QueryPlus;
 import io.druid.query.QueryRunner;
 import io.druid.query.QueryRunnerFactory;
 import io.druid.query.QueryRunnerTestHelper;
@@ -89,14 +94,14 @@ public class OnheapIncrementalIndexBenchmark extends AbstractBenchmark
     for (int i = 0; i < dimensionCount; ++i) {
       ingestAggregatorFactories.add(
           new LongSumAggregatorFactory(
-              String.format("sumResult%s", i),
-              String.format("Dim_%s", i)
+              StringUtils.format("sumResult%s", i),
+              StringUtils.format("Dim_%s", i)
           )
       );
       ingestAggregatorFactories.add(
           new DoubleSumAggregatorFactory(
-              String.format("doubleSumResult%s", i),
-              String.format("Dim_%s", i)
+              StringUtils.format("doubleSumResult%s", i),
+              StringUtils.format("Dim_%s", i)
           )
       );
     }
@@ -109,13 +114,43 @@ public class OnheapIncrementalIndexBenchmark extends AbstractBenchmark
     ConcurrentHashMap<Integer, Aggregator[]> indexedMap = new ConcurrentHashMap<Integer, Aggregator[]>();
 
     public MapIncrementalIndex(
+        IncrementalIndexSchema incrementalIndexSchema,
+        boolean deserializeComplexMetrics,
+        boolean reportParseExceptions,
+        boolean concurrentEventAdd,
+        boolean sortFacts,
+        int maxRowCount
+    )
+    {
+      super(
+          incrementalIndexSchema,
+          deserializeComplexMetrics,
+          reportParseExceptions,
+          concurrentEventAdd,
+          sortFacts,
+          maxRowCount
+      );
+    }
+
+    public MapIncrementalIndex(
         long minTimestamp,
-        QueryGranularity gran,
+        Granularity gran,
         AggregatorFactory[] metrics,
         int maxRowCount
     )
     {
-      super(minTimestamp, gran, metrics, maxRowCount);
+      super(
+          new IncrementalIndexSchema.Builder()
+            .withMinTimestamp(minTimestamp)
+            .withQueryGranularity(gran)
+            .withMetrics(metrics)
+            .build(),
+        true,
+        true,
+        false,
+        true,
+        maxRowCount
+      );
     }
 
     @Override
@@ -135,15 +170,17 @@ public class OnheapIncrementalIndexBenchmark extends AbstractBenchmark
     protected Integer addToFacts(
         AggregatorFactory[] metrics,
         boolean deserializeComplexMetrics,
+        boolean reportParseExceptions,
         InputRow row,
         AtomicInteger numEntries,
         TimeAndDims key,
         ThreadLocal<InputRow> rowContainer,
-        Supplier<InputRow> rowSupplier
+        Supplier<InputRow> rowSupplier,
+        boolean skipMaxRowsInMemoryCheck // ignore for benchmark
     ) throws IndexSizeExceededException
     {
 
-      final Integer priorIdex = getFacts().get(key);
+      final Integer priorIdex = getFacts().getPriorIndex(key);
 
       Aggregator[] aggs;
 
@@ -166,11 +203,11 @@ public class OnheapIncrementalIndexBenchmark extends AbstractBenchmark
 
 
         // Last ditch sanity checks
-        if (numEntries.get() >= maxRowCount && !getFacts().containsKey(key)) {
+        if (numEntries.get() >= maxRowCount && getFacts().getPriorIndex(key) == TimeAndDims.EMPTY_ROW_INDEX) {
           throw new IndexSizeExceededException("Maximum number of rows reached");
         }
-        final Integer prev = getFacts().putIfAbsent(key, rowIndex);
-        if (null == prev) {
+        final int prev = getFacts().putIfAbsent(key, rowIndex);
+        if (TimeAndDims.EMPTY_ROW_INDEX == prev) {
           numEntries.incrementAndGet();
         } else {
           // We lost a race
@@ -185,7 +222,15 @@ public class OnheapIncrementalIndexBenchmark extends AbstractBenchmark
 
       for (Aggregator agg : aggs) {
         synchronized (agg) {
-          agg.aggregate();
+          try {
+            agg.aggregate();
+          }
+          catch (ParseException e) {
+            // "aggregate" can throw ParseExceptions if a selector expects something but gets something else.
+            if (reportParseExceptions) {
+              throw e;
+            }
+          }
         }
       }
 
@@ -193,6 +238,12 @@ public class OnheapIncrementalIndexBenchmark extends AbstractBenchmark
 
 
       return numEntries.get();
+    }
+
+    @Override
+    public int getLastRowIndex()
+    {
+      return indexIncrement.get() - 1;
     }
   }
 
@@ -218,14 +269,15 @@ public class OnheapIncrementalIndexBenchmark extends AbstractBenchmark
     List<String> dimensionList = new ArrayList<String>(dimensionCount);
     ImmutableMap.Builder<String, Object> builder = ImmutableMap.builder();
     for (int i = 0; i < dimensionCount; i++) {
-      String dimName = String.format("Dim_%d", i);
+      String dimName = StringUtils.format("Dim_%d", i);
       dimensionList.add(dimName);
       builder.put(dimName, new Integer(rowID).longValue());
     }
     return new MapBasedInputRow(timestamp, dimensionList, builder.build());
   }
 
-  @Ignore @Test
+  @Ignore
+  @Test
   @BenchmarkOptions(callgc = true, clock = Clock.REAL_TIME, warmupRounds = 10, benchmarkRounds = 20)
   public void testConcurrentAddRead()
       throws InterruptedException, ExecutionException, NoSuchMethodException, IllegalAccessException,
@@ -236,25 +288,34 @@ public class OnheapIncrementalIndexBenchmark extends AbstractBenchmark
     final int concurrentThreads = 3;
     final int elementsPerThread = 1 << 15;
 
-    final OnheapIncrementalIndex incrementalIndex = this.incrementalIndex.getConstructor(
-        Long.TYPE,
-        QueryGranularity.class,
-        AggregatorFactory[].class,
-        Integer.TYPE
-    ).newInstance(0, QueryGranularity.NONE, factories, elementsPerThread * taskCount);
+    final IncrementalIndex incrementalIndex = this.incrementalIndex.getConstructor(
+        IncrementalIndexSchema.class,
+        boolean.class,
+        boolean.class,
+        boolean.class,
+        boolean.class,
+        int.class
+    ).newInstance(
+        new IncrementalIndexSchema.Builder().withMetrics(factories).build(),
+        true,
+        true,
+        false,
+        true,
+        elementsPerThread * taskCount
+    );
     final ArrayList<AggregatorFactory> queryAggregatorFactories = new ArrayList<>(dimensionCount + 1);
     queryAggregatorFactories.add(new CountAggregatorFactory("rows"));
     for (int i = 0; i < dimensionCount; ++i) {
       queryAggregatorFactories.add(
           new LongSumAggregatorFactory(
-              String.format("sumResult%s", i),
-              String.format("sumResult%s", i)
+              StringUtils.format("sumResult%s", i),
+              StringUtils.format("sumResult%s", i)
           )
       );
       queryAggregatorFactories.add(
           new DoubleSumAggregatorFactory(
-              String.format("doubleSumResult%s", i),
-              String.format("doubleSumResult%s", i)
+              StringUtils.format("doubleSumResult%s", i),
+              StringUtils.format("doubleSumResult%s", i)
           )
       );
     }
@@ -279,7 +340,7 @@ public class OnheapIncrementalIndexBenchmark extends AbstractBenchmark
         )
     );
     final long timestamp = System.currentTimeMillis();
-    final Interval queryInterval = new Interval("1900-01-01T00:00:00Z/2900-01-01T00:00:00Z");
+    final Interval queryInterval = Intervals.of("1900-01-01T00:00:00Z/2900-01-01T00:00:00Z");
     final List<ListenableFuture<?>> indexFutures = new LinkedList<>();
     final List<ListenableFuture<?>> queryFutures = new LinkedList<>();
     final Segment incrementalIndexSegment = new IncrementalIndexSegment(incrementalIndex, null);
@@ -328,17 +389,16 @@ public class OnheapIncrementalIndexBenchmark extends AbstractBenchmark
                   );
                   TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
                                                 .dataSource("xxx")
-                                                .granularity(QueryGranularity.ALL)
+                                                .granularity(Granularities.ALL)
                                                 .intervals(ImmutableList.of(queryInterval))
                                                 .aggregators(queryAggregatorFactories)
                                                 .build();
                   Map<String, Object> context = new HashMap<String, Object>();
-                  for (Result<TimeseriesResultValue> result :
-                      Sequences.toList(
-                          runner.run(query, context),
-                          new LinkedList<Result<TimeseriesResultValue>>()
-                      )
-                      ) {
+                  LinkedList<Result<TimeseriesResultValue>> results = Sequences.toList(
+                      runner.run(QueryPlus.wrap(query), context),
+                      new LinkedList<Result<TimeseriesResultValue>>()
+                  );
+                  for (Result<TimeseriesResultValue> result : results) {
                     if (someoneRan.get()) {
                       Assert.assertTrue(result.getValue().getDoubleMetric("doubleSumResult0") > 0);
                     }
@@ -365,13 +425,13 @@ public class OnheapIncrementalIndexBenchmark extends AbstractBenchmark
     );
     TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
                                   .dataSource("xxx")
-                                  .granularity(QueryGranularity.ALL)
+                                  .granularity(Granularities.ALL)
                                   .intervals(ImmutableList.of(queryInterval))
                                   .aggregators(queryAggregatorFactories)
                                   .build();
     Map<String, Object> context = new HashMap<String, Object>();
     List<Result<TimeseriesResultValue>> results = Sequences.toList(
-        runner.run(query, context),
+        runner.run(QueryPlus.wrap(query), context),
         new LinkedList<Result<TimeseriesResultValue>>()
     );
     final int expectedVal = elementsPerThread * taskCount;
@@ -379,14 +439,14 @@ public class OnheapIncrementalIndexBenchmark extends AbstractBenchmark
       Assert.assertEquals(elementsPerThread, result.getValue().getLongMetric("rows").intValue());
       for (int i = 0; i < dimensionCount; ++i) {
         Assert.assertEquals(
-            String.format("Failed long sum on dimension %d", i),
+            StringUtils.format("Failed long sum on dimension %d", i),
             expectedVal,
-            result.getValue().getLongMetric(String.format("sumResult%s", i)).intValue()
+            result.getValue().getLongMetric(StringUtils.format("sumResult%s", i)).intValue()
         );
         Assert.assertEquals(
-            String.format("Failed double sum on dimension %d", i),
+            StringUtils.format("Failed double sum on dimension %d", i),
             expectedVal,
-            result.getValue().getDoubleMetric(String.format("doubleSumResult%s", i)).intValue()
+            result.getValue().getDoubleMetric(StringUtils.format("doubleSumResult%s", i)).intValue()
         );
       }
     }

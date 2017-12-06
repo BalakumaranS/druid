@@ -21,12 +21,14 @@ package io.druid.cli;
 
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Binder;
+import com.google.inject.Key;
 import com.google.inject.Module;
 import com.google.inject.Provides;
 import com.google.inject.name.Names;
 import com.google.inject.util.Providers;
-import com.metamx.common.logger.Logger;
 import io.airlift.airline.Command;
+import io.druid.discovery.DruidNodeDiscoveryProvider;
+import io.druid.discovery.WorkerNodeService;
 import io.druid.guice.IndexingServiceFirehoseModule;
 import io.druid.guice.IndexingServiceModuleHelper;
 import io.druid.guice.IndexingServiceTaskLogsModule;
@@ -44,6 +46,7 @@ import io.druid.indexing.worker.WorkerCuratorCoordinator;
 import io.druid.indexing.worker.WorkerTaskMonitor;
 import io.druid.indexing.worker.config.WorkerConfig;
 import io.druid.indexing.worker.http.WorkerResource;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.segment.realtime.firehose.ChatHandlerProvider;
 import io.druid.server.DruidNode;
 import io.druid.server.initialization.jetty.JettyServerInitializer;
@@ -55,7 +58,7 @@ import java.util.List;
  */
 @Command(
     name = "middleManager",
-    description = "Runs a Middle Manager, this is a \"task\" node used as part of the remote indexing service."
+    description = "Runs a Middle Manager, this is a \"task\" node used as part of the remote indexing service, see http://druid.io/docs/latest/design/middlemanager.html for a description"
 )
 public class CliMiddleManager extends ServerRunnable
 {
@@ -77,6 +80,7 @@ public class CliMiddleManager extends ServerRunnable
           {
             binder.bindConstant().annotatedWith(Names.named("serviceName")).to("druid/middlemanager");
             binder.bindConstant().annotatedWith(Names.named("servicePort")).to(8091);
+            binder.bindConstant().annotatedWith(Names.named("tlsServicePort")).to(8291);
 
             IndexingServiceModuleHelper.configureTaskRunnerConfigs(binder);
 
@@ -96,6 +100,14 @@ public class CliMiddleManager extends ServerRunnable
             Jerseys.addResource(binder, WorkerResource.class);
 
             LifecycleModule.register(binder, Server.class);
+
+            binder.bind(DiscoverySideEffectsProvider.Child.class).toProvider(
+                new DiscoverySideEffectsProvider(
+                    DruidNodeDiscoveryProvider.NODE_TYPE_MM,
+                    ImmutableList.of(WorkerNodeService.class)
+                )
+            ).in(LazySingleton.class);
+            LifecycleModule.registerKey(binder, Key.get(DiscoverySideEffectsProvider.Child.class));
           }
 
           @Provides
@@ -103,10 +115,22 @@ public class CliMiddleManager extends ServerRunnable
           public Worker getWorker(@Self DruidNode node, WorkerConfig config)
           {
             return new Worker(
-                node.getHostAndPort(),
+                node.getServiceScheme(),
+                node.getHostAndPortToUse(),
                 config.getIp(),
                 config.getCapacity(),
                 config.getVersion()
+            );
+          }
+
+          @Provides
+          @LazySingleton
+          public WorkerNodeService getWorkerNodeService(WorkerConfig workerConfig)
+          {
+            return new WorkerNodeService(
+                workerConfig.getIp(),
+                workerConfig.getCapacity(),
+                workerConfig.getVersion()
             );
           }
         },

@@ -24,11 +24,13 @@ import com.google.inject.Key;
 import com.google.inject.Module;
 import com.google.inject.Provides;
 import com.google.inject.name.Names;
-import com.metamx.common.lifecycle.LifecycleStart;
-import com.metamx.common.lifecycle.LifecycleStop;
-import com.metamx.common.logger.Logger;
+
 import io.druid.common.config.Log4jShutdown;
 import io.druid.guice.ManageLifecycle;
+import io.druid.java.util.common.lifecycle.LifecycleStart;
+import io.druid.java.util.common.lifecycle.LifecycleStop;
+import io.druid.java.util.common.logger.Logger;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.impl.Log4jContextFactory;
 import org.apache.logging.log4j.core.util.ShutdownCallbackRegistry;
@@ -46,7 +48,7 @@ public class Log4jShutterDownerModule implements Module
 
     try {
       ClassLoader loader = Thread.currentThread().getContextClassLoader();
-      if(loader == null) {
+      if (loader == null) {
         loader = getClass().getClassLoader();
       }
       // Reflection to try and allow non Log4j2 stuff to run. This acts as a gateway to stop errors in the next few lines

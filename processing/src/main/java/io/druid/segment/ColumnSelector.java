@@ -17,11 +17,18 @@
  * under the License.
  */
 
-package io.druid.segment;import io.druid.segment.column.Column;
+package io.druid.segment;
+
+import io.druid.segment.column.Column;
+import io.druid.segment.data.Indexed;
+
+import javax.annotation.Nullable;
 
 /**
  */
 public interface ColumnSelector
 {
-  public Column getColumn(String columnName);
+  Indexed<String> getColumnNames();
+  @Nullable
+  Column getColumn(String columnName);
 }

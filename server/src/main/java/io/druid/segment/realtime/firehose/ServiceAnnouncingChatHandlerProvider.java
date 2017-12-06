@@ -20,15 +20,17 @@
 package io.druid.segment.realtime.firehose;
 
 import com.google.common.base.Optional;
-import com.google.common.collect.Maps;
 import com.google.inject.Inject;
-import com.metamx.common.ISE;
-import com.metamx.common.logger.Logger;
 import io.druid.curator.discovery.ServiceAnnouncer;
-import io.druid.server.DruidNode;
 import io.druid.guice.annotations.RemoteChatHandler;
+import io.druid.java.util.common.ISE;
+import io.druid.java.util.common.logger.Logger;
+import io.druid.server.DruidNode;
+import io.druid.server.initialization.ServerConfig;
 
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ConcurrentSkipListSet;
 
 /**
  * Provides a way for the outside world to talk to objects in the indexing service. The {@link #get(String)} method
@@ -41,35 +43,50 @@ public class ServiceAnnouncingChatHandlerProvider implements ChatHandlerProvider
 
   private final DruidNode node;
   private final ServiceAnnouncer serviceAnnouncer;
+  private final ServerConfig serverConfig;
   private final ConcurrentMap<String, ChatHandler> handlers;
+  private final ConcurrentSkipListSet<String> announcements;
 
   @Inject
   public ServiceAnnouncingChatHandlerProvider(
       @RemoteChatHandler DruidNode node,
-      ServiceAnnouncer serviceAnnouncer
+      ServiceAnnouncer serviceAnnouncer,
+      ServerConfig serverConfig
   )
   {
     this.node = node;
     this.serviceAnnouncer = serviceAnnouncer;
-    this.handlers = Maps.newConcurrentMap();
+    this.serverConfig = serverConfig;
+    this.handlers = new ConcurrentHashMap<>();
+    this.announcements = new ConcurrentSkipListSet<>();
   }
 
   @Override
   public void register(final String service, ChatHandler handler)
   {
-    final DruidNode node = makeDruidNode(service);
+    register(service, handler, true);
+  }
+
+  @Override
+  public void register(final String service, ChatHandler handler, boolean announce)
+  {
     log.info("Registering Eventhandler[%s]", service);
 
     if (handlers.putIfAbsent(service, handler) != null) {
       throw new ISE("handler already registered for service[%s]", service);
     }
 
-    try {
-      serviceAnnouncer.announce(node);
-    }
-    catch (Exception e) {
-      log.warn(e, "Failed to register service[%s]", service);
-      handlers.remove(service, handler);
+    if (announce) {
+      try {
+        serviceAnnouncer.announce(makeDruidNode(service));
+        if (!announcements.add(service)) {
+          throw new ISE("announcements already has an entry for service[%s]", service);
+        }
+      }
+      catch (Exception e) {
+        log.warn(e, "Failed to register service[%s]", service);
+        handlers.remove(service, handler);
+      }
     }
   }
 
@@ -81,13 +98,18 @@ public class ServiceAnnouncingChatHandlerProvider implements ChatHandlerProvider
     final ChatHandler handler = handlers.get(service);
     if (handler == null) {
       log.warn("handler[%s] not currently registered, ignoring.", service);
+      return;
     }
 
-    try {
-      serviceAnnouncer.unannounce(makeDruidNode(service));
-    }
-    catch (Exception e) {
-      log.warn(e, "Failed to unregister service[%s]", service);
+    if (announcements.contains(service)) {
+      try {
+        serviceAnnouncer.unannounce(makeDruidNode(service));
+      }
+      catch (Exception e) {
+        log.warn(e, "Failed to unregister service[%s]", service);
+      }
+
+      announcements.remove(service);
     }
 
     handlers.remove(service, handler);
@@ -101,6 +123,6 @@ public class ServiceAnnouncingChatHandlerProvider implements ChatHandlerProvider
 
   private DruidNode makeDruidNode(String key)
   {
-    return new DruidNode(key, node.getHost(), node.getPort());
+    return new DruidNode(key, node.getHost(), node.getPlaintextPort(), node.getTlsPort(), node.isEnablePlaintextPort(), node.isEnableTlsPort());
   }
 }

@@ -27,6 +27,8 @@ import io.druid.initialization.DruidModule;
 import io.druid.segment.realtime.firehose.ClippedFirehoseFactory;
 import io.druid.segment.realtime.firehose.CombiningFirehoseFactory;
 import io.druid.segment.realtime.firehose.EventReceiverFirehoseFactory;
+import io.druid.segment.realtime.firehose.FixedCountFirehoseFactory;
+import io.druid.segment.realtime.firehose.HttpFirehoseFactory;
 import io.druid.segment.realtime.firehose.IrcFirehoseFactory;
 import io.druid.segment.realtime.firehose.LocalFirehoseFactory;
 import io.druid.segment.realtime.firehose.TimedShutoffFirehoseFactory;
@@ -53,8 +55,10 @@ public class FirehoseModule implements DruidModule
                 new NamedType(TimedShutoffFirehoseFactory.class, "timed"),
                 new NamedType(IrcFirehoseFactory.class, "irc"),
                 new NamedType(LocalFirehoseFactory.class, "local"),
+                new NamedType(HttpFirehoseFactory.class, "http"),
                 new NamedType(EventReceiverFirehoseFactory.class, "receiver"),
-                new NamedType(CombiningFirehoseFactory.class, "combining")
+                new NamedType(CombiningFirehoseFactory.class, "combining"),
+                new NamedType(FixedCountFirehoseFactory.class, "fixedCount")
             )
     );
   }

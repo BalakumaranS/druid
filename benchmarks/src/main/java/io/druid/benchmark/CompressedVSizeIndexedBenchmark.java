@@ -22,8 +22,9 @@ package io.druid.benchmark;
 import com.google.common.base.Function;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
+import io.druid.java.util.common.io.Closer;
 import io.druid.segment.CompressedVSizeIndexedSupplier;
-import io.druid.segment.data.CompressedObjectStrategy;
+import io.druid.segment.data.CompressionStrategy;
 import io.druid.segment.data.IndexedInts;
 import io.druid.segment.data.IndexedMultivalue;
 import io.druid.segment.data.VSizeIndexed;
@@ -95,11 +96,14 @@ public class CompressedVSizeIndexedBenchmark
                 }
             ),
             bound - 1,
-            ByteOrder.nativeOrder(), CompressedObjectStrategy.CompressionStrategy.LZ4
+            ByteOrder.nativeOrder(),
+            CompressionStrategy.LZ4,
+            Closer.create()
         )
     );
     this.compressed = CompressedVSizeIndexedSupplier.fromByteBuffer(
-        bufferCompressed, ByteOrder.nativeOrder()
+        bufferCompressed,
+        ByteOrder.nativeOrder()
     ).get();
 
     final ByteBuffer bufferUncompressed = serialize(
@@ -115,7 +119,7 @@ public class CompressedVSizeIndexedBenchmark
                   }
                 }
             )
-        ).asWritableSupplier()
+        )
     );
     this.uncompressed = VSizeIndexed.readFromByteBuffer(bufferUncompressed);
 
@@ -124,7 +128,7 @@ public class CompressedVSizeIndexedBenchmark
       int rowToAccess = rand.nextInt(rows.size());
       // Skip already selected rows if any
       while (filter.get(rowToAccess)) {
-        rowToAccess = (rowToAccess+1) % rows.size();
+        rowToAccess = (rowToAccess + 1) % rows.size();
       }
       filter.set(rowToAccess);
     }
@@ -157,7 +161,7 @@ public class CompressedVSizeIndexedBenchmark
       }
     };
 
-    writableSupplier.writeToChannel(channel);
+    writableSupplier.writeTo(channel, null);
     buffer.rewind();
     return buffer;
   }

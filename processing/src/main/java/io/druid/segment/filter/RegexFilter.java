@@ -20,6 +20,11 @@
 package io.druid.segment.filter;
 
 import com.google.common.base.Predicate;
+import io.druid.query.extraction.ExtractionFn;
+import io.druid.query.filter.DruidDoublePredicate;
+import io.druid.query.filter.DruidFloatPredicate;
+import io.druid.query.filter.DruidLongPredicate;
+import io.druid.query.filter.DruidPredicateFactory;
 
 import java.util.regex.Pattern;
 
@@ -28,22 +33,48 @@ import java.util.regex.Pattern;
 public class RegexFilter extends DimensionPredicateFilter
 {
   public RegexFilter(
-      String dimension,
-      final String pattern
+      final String dimension,
+      final Pattern pattern,
+      final ExtractionFn extractionFn
   )
   {
     super(
         dimension,
-        new Predicate<String>()
+        new DruidPredicateFactory()
         {
-          Pattern compiled = Pattern.compile(pattern);
+          @Override
+          public Predicate<String> makeStringPredicate()
+          {
+            return input -> (input != null) && pattern.matcher(input).find();
+          }
 
           @Override
-          public boolean apply(String input)
+          public DruidLongPredicate makeLongPredicate()
           {
-            return (input != null) && compiled.matcher(input).find();
+            return input -> pattern.matcher(String.valueOf(input)).find();
           }
-        }
+
+          @Override
+          public DruidFloatPredicate makeFloatPredicate()
+          {
+            return input -> pattern.matcher(String.valueOf(input)).find();
+          }
+
+          @Override
+          public DruidDoublePredicate makeDoublePredicate()
+          {
+            return input -> pattern.matcher(String.valueOf(input)).find();
+          }
+
+          @Override
+          public String toString()
+          {
+            return "RegexFilter{" +
+                   "pattern='" + pattern + '\'' +
+                   '}';
+          }
+        },
+        extractionFn
     );
   }
 }

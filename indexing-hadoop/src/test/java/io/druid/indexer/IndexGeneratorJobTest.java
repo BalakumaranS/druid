@@ -21,19 +21,20 @@ package io.druid.indexer;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.jsontype.NamedType;
-import com.google.common.base.Charsets;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.metamx.common.Granularity;
 import io.druid.data.input.impl.CSVParseSpec;
 import io.druid.data.input.impl.DimensionsSpec;
 import io.druid.data.input.impl.InputRowParser;
 import io.druid.data.input.impl.JSONParseSpec;
 import io.druid.data.input.impl.StringInputRowParser;
 import io.druid.data.input.impl.TimestampSpec;
-import io.druid.granularity.QueryGranularity;
+import io.druid.java.util.common.Intervals;
+import io.druid.java.util.common.RE;
+import io.druid.java.util.common.StringUtils;
+import io.druid.java.util.common.granularity.Granularities;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.CountAggregatorFactory;
 import io.druid.query.aggregation.LongSumAggregatorFactory;
@@ -42,6 +43,7 @@ import io.druid.segment.indexing.DataSchema;
 import io.druid.segment.indexing.granularity.UniformGranularitySpec;
 import io.druid.timeline.DataSegment;
 import io.druid.timeline.partition.HashBasedNumberedShardSpec;
+import io.druid.timeline.partition.NumberedShardSpec;
 import io.druid.timeline.partition.ShardSpec;
 import io.druid.timeline.partition.SingleDimensionShardSpec;
 import org.apache.commons.io.FileUtils;
@@ -89,7 +91,7 @@ public class IndexGeneratorJobTest
 
   @Parameterized.Parameters(name = "useCombiner={0}, partitionType={1}, interval={2}, shardInfoForEachSegment={3}, " +
                                    "data={4}, inputFormatName={5}, inputRowParser={6}, maxRowsInMemory={7}, " +
-                                   "aggs={8}, datasourceName={9}, buildV9Directly={10}")
+                                   "aggs={8}, datasourceName={9}, forceExtendableShardSpecs={10}")
   public static Collection<Object[]> constructFeed()
   {
     final List<Object[]> baseConstructors = Arrays.asList(
@@ -140,10 +142,13 @@ public class IndexGeneratorJobTest
                 new StringInputRowParser(
                     new CSVParseSpec(
                         new TimestampSpec("timestamp", "yyyyMMddHH", null),
-                        new DimensionsSpec(ImmutableList.of("host"), null, null),
+                        new DimensionsSpec(DimensionsSpec.getDefaultSchemas(ImmutableList.of("host")), null, null),
                         null,
-                        ImmutableList.of("timestamp", "host", "visited_num")
-                    )
+                        ImmutableList.of("timestamp", "host", "visited_num"),
+                        false,
+                        0
+                    ),
+                    null
                 ),
                 null,
                 aggs1,
@@ -185,9 +190,11 @@ public class IndexGeneratorJobTest
                 new HadoopyStringInputRowParser(
                     new CSVParseSpec(
                         new TimestampSpec("timestamp", "yyyyMMddHH", null),
-                        new DimensionsSpec(ImmutableList.of("host"), null, null),
+                        new DimensionsSpec(DimensionsSpec.getDefaultSchemas(ImmutableList.of("host")), null, null),
                         null,
-                        ImmutableList.of("timestamp", "host", "visited_num")
+                        ImmutableList.of("timestamp", "host", "visited_num"),
+                        false,
+                        0
                     )
                 ),
                 null,
@@ -230,10 +237,13 @@ public class IndexGeneratorJobTest
                 new StringInputRowParser(
                     new CSVParseSpec(
                         new TimestampSpec("timestamp", "yyyyMMddHH", null),
-                        new DimensionsSpec(ImmutableList.of("host"), null, null),
+                        new DimensionsSpec(DimensionsSpec.getDefaultSchemas(ImmutableList.of("host")), null, null),
                         null,
-                        ImmutableList.of("timestamp", "host", "visited_num")
-                    )
+                        ImmutableList.of("timestamp", "host", "visited_num"),
+                        false,
+                        0
+                    ),
+                    null
                 ),
                 null,
                 aggs1,
@@ -285,9 +295,11 @@ public class IndexGeneratorJobTest
                 new HadoopyStringInputRowParser(
                     new CSVParseSpec(
                         new TimestampSpec("timestamp", "yyyyMMddHH", null),
-                        new DimensionsSpec(ImmutableList.of("host"), null, null),
+                        new DimensionsSpec(DimensionsSpec.getDefaultSchemas(ImmutableList.of("host")), null, null),
                         null,
-                        ImmutableList.of("timestamp", "host", "visited_num")
+                        ImmutableList.of("timestamp", "host", "visited_num"),
+                        false,
+                        0
                     )
                 ),
                 null,
@@ -316,8 +328,11 @@ public class IndexGeneratorJobTest
                 new StringInputRowParser(
                     new JSONParseSpec(
                         new TimestampSpec("ts", "yyyyMMddHH", null),
-                        new DimensionsSpec(null, null, null)
-                    )
+                        new DimensionsSpec(null, null, null),
+                        null,
+                        null
+                    ),
+                    null
                 ),
                 1, // force 1 row max per index for easier testing
                 aggs2,
@@ -345,8 +360,11 @@ public class IndexGeneratorJobTest
                 new StringInputRowParser(
                     new JSONParseSpec(
                         new TimestampSpec("ts", "yyyyMMddHH", null),
-                        new DimensionsSpec(ImmutableList.of("B", "F", "M", "Q", "X", "Y"), null, null)
-                    )
+                        new DimensionsSpec(DimensionsSpec.getDefaultSchemas(ImmutableList.of("B", "F", "M", "Q", "X", "Y")), null, null),
+                        null,
+                        null
+                    ),
+                    null
                 ),
                 1, // force 1 row max per index for easier testing
                 aggs2,
@@ -355,17 +373,15 @@ public class IndexGeneratorJobTest
         }
     );
 
-    // Run each baseConstructor with/without buildV9Directly.
+    // Run each baseConstructor with/without forceExtendableShardSpecs.
     final List<Object[]> constructors = Lists.newArrayList();
     for (Object[] baseConstructor : baseConstructors) {
-      final Object[] c1 = new Object[baseConstructor.length + 1];
-      final Object[] c2 = new Object[baseConstructor.length + 1];
-      System.arraycopy(baseConstructor, 0, c1, 0, baseConstructor.length);
-      System.arraycopy(baseConstructor, 0, c2, 0, baseConstructor.length);
-      c1[c1.length - 1] = true;
-      c2[c2.length - 1] = false;
-      constructors.add(c1);
-      constructors.add(c2);
+      for (int forceExtendableShardSpecs = 0; forceExtendableShardSpecs < 2; forceExtendableShardSpecs++) {
+        final Object[] fullConstructor = new Object[baseConstructor.length + 1];
+        System.arraycopy(baseConstructor, 0, fullConstructor, 0, baseConstructor.length);
+        fullConstructor[baseConstructor.length] = forceExtendableShardSpecs == 0;
+        constructors.add(fullConstructor);
+      }
     }
 
     return constructors;
@@ -384,7 +400,7 @@ public class IndexGeneratorJobTest
   private final Integer maxRowsInMemory;
   private final AggregatorFactory[] aggs;
   private final String datasourceName;
-  private final boolean buildV9Directly;
+  private final boolean forceExtendableShardSpecs;
 
   private ObjectMapper mapper;
   private HadoopDruidIndexerConfig config;
@@ -402,20 +418,20 @@ public class IndexGeneratorJobTest
       Integer maxRowsInMemory,
       AggregatorFactory[] aggs,
       String datasourceName,
-      boolean buildV9Directly
-      ) throws IOException
+      boolean forceExtendableShardSpecs
+  ) throws IOException
   {
     this.useCombiner = useCombiner;
     this.partitionType = partitionType;
     this.shardInfoForEachSegment = shardInfoForEachSegment;
-    this.interval = new Interval(interval);
+    this.interval = Intervals.of(interval);
     this.data = data;
     this.inputFormatName = inputFormatName;
     this.inputRowParser = inputRowParser;
     this.maxRowsInMemory = maxRowsInMemory;
     this.aggs = aggs;
     this.datasourceName = datasourceName;
-    this.buildV9Directly = buildV9Directly;
+    this.forceExtendableShardSpecs = forceExtendableShardSpecs;
   }
 
   private void writeDataToLocalSequenceFile(File outputFile, List<String> data) throws IOException
@@ -437,7 +453,7 @@ public class IndexGeneratorJobTest
       ByteBuffer buf = ByteBuffer.allocate(4);
       buf.putInt(keyCount);
       BytesWritable key = new BytesWritable(buf.array());
-      BytesWritable value = new BytesWritable(line.getBytes(Charsets.UTF_8));
+      BytesWritable value = new BytesWritable(StringUtils.toUtf8(line));
       fileWriter.append(key, value);
       keyCount += 1;
     }
@@ -478,8 +494,9 @@ public class IndexGeneratorJobTest
                 ),
                 aggs,
                 new UniformGranularitySpec(
-                    Granularity.DAY, QueryGranularity.NONE, ImmutableList.of(this.interval)
+                    Granularities.DAY, Granularities.NONE, ImmutableList.of(this.interval)
                 ),
+                null,
                 mapper
             ),
             new HadoopIOConfig(
@@ -502,7 +519,10 @@ public class IndexGeneratorJobTest
                 false,
                 useCombiner,
                 null,
-                buildV9Directly,
+                true,
+                null,
+                forceExtendableShardSpecs,
+                false,
                 null
             )
         )
@@ -517,7 +537,7 @@ public class IndexGeneratorJobTest
     List<ShardSpec> specs = Lists.newArrayList();
     if (partitionType.equals("hashed")) {
       for (Integer[] shardInfo : (Integer[][]) shardInfoForEachShard) {
-        specs.add(new HashBasedNumberedShardSpec(shardInfo[0], shardInfo[1], HadoopDruidIndexerConfig.JSON_MAPPER));
+        specs.add(new HashBasedNumberedShardSpec(shardInfo[0], shardInfo[1], null, HadoopDruidIndexerConfig.JSON_MAPPER));
       }
     } else if (partitionType.equals("single")) {
       int partitionNum = 0;
@@ -525,28 +545,28 @@ public class IndexGeneratorJobTest
         specs.add(new SingleDimensionShardSpec("host", shardInfo[0], shardInfo[1], partitionNum++));
       }
     } else {
-      throw new RuntimeException(String.format("Invalid partition type:[%s]", partitionType));
+      throw new RE("Invalid partition type:[%s]", partitionType);
     }
 
     return specs;
   }
 
-  private Map<DateTime, List<HadoopyShardSpec>> loadShardSpecs(
+  private Map<Long, List<HadoopyShardSpec>> loadShardSpecs(
       String partitionType,
       Object[][][] shardInfoForEachShard
   )
   {
-    Map<DateTime, List<HadoopyShardSpec>> shardSpecs = Maps.newTreeMap(DateTimeComparator.getInstance());
+    Map<Long, List<HadoopyShardSpec>> shardSpecs = Maps.newTreeMap(DateTimeComparator.getInstance());
     int shardCount = 0;
     int segmentNum = 0;
     for (Interval segmentGranularity : config.getSegmentGranularIntervals().get()) {
       List<ShardSpec> specs = constructShardSpecFromShardInfo(partitionType, shardInfoForEachShard[segmentNum++]);
       List<HadoopyShardSpec> actualSpecs = Lists.newArrayListWithExpectedSize(specs.size());
-      for (int i = 0; i < specs.size(); ++i) {
-        actualSpecs.add(new HadoopyShardSpec(specs.get(i), shardCount++));
+      for (ShardSpec spec : specs) {
+        actualSpecs.add(new HadoopyShardSpec(spec, shardCount++));
       }
 
-      shardSpecs.put(segmentGranularity.getStart(), actualSpecs);
+      shardSpecs.put(segmentGranularity.getStartMillis(), actualSpecs);
     }
 
     return shardSpecs;
@@ -566,7 +586,7 @@ public class IndexGeneratorJobTest
     for (DateTime currTime = interval.getStart(); currTime.isBefore(interval.getEnd()); currTime = currTime.plusDays(1)) {
       Object[][] shardInfo = shardInfoForEachSegment[segmentNum++];
       File segmentOutputFolder = new File(
-          String.format(
+          StringUtils.format(
               "%s/%s/%s_%s/%s",
               config.getSchema().getIOConfig().getSegmentOutputPath(),
               config.getSchema().getDataSchema().getDataSource(),
@@ -611,7 +631,11 @@ public class IndexGeneratorJobTest
           Assert.fail("Test did not specify supported datasource name");
         }
 
-        if (partitionType.equals("hashed")) {
+        if (forceExtendableShardSpecs) {
+          NumberedShardSpec spec = (NumberedShardSpec) dataSegment.getShardSpec();
+          Assert.assertEquals(partitionNum, spec.getPartitionNum());
+          Assert.assertEquals(shardInfo.length, spec.getPartitions());
+        } else if (partitionType.equals("hashed")) {
           Integer[] hashShardInfo = (Integer[]) shardInfo[partitionNum];
           HashBasedNumberedShardSpec spec = (HashBasedNumberedShardSpec) dataSegment.getShardSpec();
           Assert.assertEquals((int) hashShardInfo[0], spec.getPartitionNum());
@@ -622,7 +646,7 @@ public class IndexGeneratorJobTest
           Assert.assertEquals(singleDimensionShardInfo[0], spec.getStart());
           Assert.assertEquals(singleDimensionShardInfo[1], spec.getEnd());
         } else {
-          throw new RuntimeException(String.format("Invalid partition type:[%s]", partitionType));
+          throw new RE("Invalid partition type:[%s]", partitionType);
         }
       }
     }

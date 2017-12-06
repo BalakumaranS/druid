@@ -21,5 +21,6 @@ package io.druid.metadata;
 
 public interface MetadataSegmentPublisherProvider extends SegmentPublisherProvider
 {
-  public MetadataSegmentPublisher get();
+  @Override
+  MetadataSegmentPublisher get();
 }

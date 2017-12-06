@@ -19,6 +19,7 @@
 
 package io.druid.query;
 
+import io.druid.guice.annotations.ExtensionPoint;
 import io.druid.segment.Segment;
 
 import java.util.concurrent.ExecutorService;
@@ -26,6 +27,7 @@ import java.util.concurrent.ExecutorService;
 /**
  * An interface that defines the nitty gritty implementation detauls of a Query on a Segment
  */
+@ExtensionPoint
 public interface QueryRunnerFactory<T, QueryType extends Query<T>>
 {
   /**
@@ -38,7 +40,7 @@ public interface QueryRunnerFactory<T, QueryType extends Query<T>>
    * @param segment The segment to process
    * @return A QueryRunner that, when asked, will generate a Sequence of results based on the given segment
    */
-  public QueryRunner<T> createRunner(Segment segment);
+  QueryRunner<T> createRunner(Segment segment);
 
   /**
    * Runners generated with createRunner() and combined into an Iterable in (time,shardId) order are passed
@@ -55,14 +57,14 @@ public interface QueryRunnerFactory<T, QueryType extends Query<T>>
    *
    * @param queryExecutor ExecutorService to be used for parallel processing
    * @param queryRunners Individual QueryRunner objects that produce some results
-   * @return a QueryRunner that, when asked, will use the ExecutorService to runt he base QueryRunners
+   * @return a QueryRunner that, when asked, will use the ExecutorService to run the base QueryRunners
    */
-  public QueryRunner<T> mergeRunners(ExecutorService queryExecutor, Iterable<QueryRunner<T>> queryRunners);
+  QueryRunner<T> mergeRunners(ExecutorService queryExecutor, Iterable<QueryRunner<T>> queryRunners);
 
   /**
    * Provides access to the toolchest for this specific query type.
    *
    * @return an instance of the toolchest for this specific query type.
    */
-  public QueryToolChest<T, QueryType> getToolchest();
+  QueryToolChest<T, QueryType> getToolchest();
 }

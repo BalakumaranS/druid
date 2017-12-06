@@ -50,10 +50,10 @@ public class TopNNumericResultBuilder implements TopNResultBuilder
   private final PriorityQueue<DimValHolder> pQueue;
   private final Comparator<DimValHolder> dimValComparator;
   private final String[] aggFactoryNames;
-  private static final Comparator<String> dimNameComparator = new Comparator<String>()
+  private static final Comparator<Comparable> dimNameComparator = new Comparator<Comparable>()
   {
     @Override
-    public int compare(String o1, String o2)
+    public int compare(Comparable o1, Comparable o2)
     {
       int retval;
       if (null == o1) {
@@ -114,7 +114,7 @@ public class TopNNumericResultBuilder implements TopNResultBuilder
 
   @Override
   public TopNNumericResultBuilder addEntry(
-      String dimName,
+      Comparable dimName,
       Object dimValIndex,
       Object[] metricVals
   )
@@ -133,16 +133,22 @@ public class TopNNumericResultBuilder implements TopNResultBuilder
     switch (extra) {
       case 7:
         metricValues.put(aggFactoryNames[6], metricVals[6]);
+        // fall through
       case 6:
         metricValues.put(aggFactoryNames[5], metricVals[5]);
+        // fall through
       case 5:
         metricValues.put(aggFactoryNames[4], metricVals[4]);
+        // fall through
       case 4:
         metricValues.put(aggFactoryNames[3], metricVals[3]);
+        // fall through
       case 3:
         metricValues.put(aggFactoryNames[2], metricVals[2]);
+        // fall through
       case 2:
         metricValues.put(aggFactoryNames[1], metricVals[1]);
+        // fall through
       case 1:
         metricValues.put(aggFactoryNames[0], metricVals[0]);
     }
@@ -196,7 +202,7 @@ public class TopNNumericResultBuilder implements TopNResultBuilder
     if (shouldAdd(dimValue)) {
       final DimValHolder valHolder = new DimValHolder.Builder()
           .withTopNMetricVal(dimValue)
-          .withDimName(dimensionAndMetricValueExtractor.getStringDimensionValue(dimSpec.getOutputName()))
+          .withDimName((Comparable) dimensionAndMetricValueExtractor.getDimensionValue(dimSpec.getOutputName()))
           .withMetricValues(dimensionAndMetricValueExtractor.getBaseObject())
           .build();
       pQueue.add(valHolder);

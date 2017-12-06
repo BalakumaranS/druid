@@ -20,7 +20,7 @@
 package io.druid.query.dimension;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
-import com.metamx.common.IAE;
+import io.druid.java.util.common.IAE;
 
 import java.util.Map;
 
@@ -28,7 +28,7 @@ import java.util.Map;
  */
 public class LegacyDimensionSpec extends DefaultDimensionSpec
 {
-  private static final String convertValue(Object dimension, String name)
+  private static String convertValue(Object dimension, String name)
   {
     final String retVal;
 

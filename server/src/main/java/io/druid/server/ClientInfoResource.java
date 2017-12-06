@@ -19,20 +19,32 @@
 
 package io.druid.server;
 
+import com.google.common.base.Function;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.google.inject.Inject;
-import com.metamx.common.logger.Logger;
+import com.sun.jersey.spi.container.ResourceFilters;
 import io.druid.client.DruidDataSource;
 import io.druid.client.DruidServer;
-import io.druid.client.InventoryView;
+import io.druid.client.FilteredServerInventoryView;
+import io.druid.client.ServerViewUtil;
 import io.druid.client.TimelineServerView;
 import io.druid.client.selector.ServerSelector;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.Intervals;
+import io.druid.java.util.common.JodaUtils;
+import io.druid.java.util.common.logger.Logger;
+import io.druid.query.LocatedSegmentDescriptor;
 import io.druid.query.TableDataSource;
 import io.druid.query.metadata.SegmentMetadataQueryConfig;
+import io.druid.server.http.security.DatasourceResourceFilter;
+import io.druid.server.security.AuthConfig;
+import io.druid.server.security.AuthorizerMapper;
+import io.druid.server.security.AuthorizationUtils;
+import io.druid.server.security.ResourceAction;
 import io.druid.timeline.DataSegment;
 import io.druid.timeline.TimelineLookup;
 import io.druid.timeline.TimelineObjectHolder;
@@ -40,12 +52,16 @@ import io.druid.timeline.partition.PartitionHolder;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
 
+import javax.servlet.http.HttpServletRequest;
+import javax.ws.rs.DefaultValue;
 import javax.ws.rs.GET;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
+import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
+import java.io.IOException;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
@@ -63,21 +79,27 @@ public class ClientInfoResource
   private static final String KEY_DIMENSIONS = "dimensions";
   private static final String KEY_METRICS = "metrics";
 
-  private InventoryView serverInventoryView;
+  private FilteredServerInventoryView serverInventoryView;
   private TimelineServerView timelineServerView;
   private SegmentMetadataQueryConfig segmentMetadataQueryConfig;
+  private final AuthConfig authConfig;
+  private final AuthorizerMapper authorizerMapper;
 
   @Inject
   public ClientInfoResource(
-      InventoryView serverInventoryView,
+      FilteredServerInventoryView serverInventoryView,
       TimelineServerView timelineServerView,
-      SegmentMetadataQueryConfig segmentMetadataQueryConfig
+      SegmentMetadataQueryConfig segmentMetadataQueryConfig,
+      AuthConfig authConfig,
+      AuthorizerMapper authorizerMapper
   )
   {
     this.serverInventoryView = serverInventoryView;
     this.timelineServerView = timelineServerView;
     this.segmentMetadataQueryConfig = (segmentMetadataQueryConfig == null) ?
                                       new SegmentMetadataQueryConfig() : segmentMetadataQueryConfig;
+    this.authConfig = authConfig;
+    this.authorizerMapper = authorizerMapper;
   }
 
   private Map<String, List<DataSegment>> getSegmentsForDatasources()
@@ -97,14 +119,24 @@ public class ClientInfoResource
 
   @GET
   @Produces(MediaType.APPLICATION_JSON)
-  public Iterable<String> getDataSources()
+  public Iterable<String> getDataSources(@Context final HttpServletRequest request)
   {
-    return getSegmentsForDatasources().keySet();
+    Function<String, Iterable<ResourceAction>> raGenerator = datasourceName -> {
+      return Lists.newArrayList(AuthorizationUtils.DATASOURCE_READ_RA_GENERATOR.apply(datasourceName));
+    };
+
+    return AuthorizationUtils.filterAuthorizedResources(
+        request,
+        getSegmentsForDatasources().keySet(),
+        raGenerator,
+        authorizerMapper
+    );
   }
 
   @GET
   @Path("/{dataSourceName}")
   @Produces(MediaType.APPLICATION_JSON)
+  @ResourceFilters(DatasourceResourceFilter.class)
   public Map<String, Object> getDatasource(
       @PathParam("dataSourceName") String dataSourceName,
       @QueryParam("interval") String interval,
@@ -123,7 +155,7 @@ public class ClientInfoResource
       DateTime now = getCurrentTime();
       theInterval = new Interval(segmentMetadataQueryConfig.getDefaultHistory(), now);
     } else {
-      theInterval = new Interval(interval);
+      theInterval = Intervals.of(interval);
     }
 
     TimelineLookup<String, ServerSelector> timeline = timelineServerView.getTimeline(new TableDataSource(dataSourceName));
@@ -192,6 +224,7 @@ public class ClientInfoResource
   @GET
   @Path("/{dataSourceName}/dimensions")
   @Produces(MediaType.APPLICATION_JSON)
+  @ResourceFilters(DatasourceResourceFilter.class)
   public Iterable<String> getDatasourceDimensions(
       @PathParam("dataSourceName") String dataSourceName,
       @QueryParam("interval") String interval
@@ -209,7 +242,7 @@ public class ClientInfoResource
       DateTime now = getCurrentTime();
       theInterval = new Interval(segmentMetadataQueryConfig.getDefaultHistory(), now);
     } else {
-      theInterval = new Interval(interval);
+      theInterval = Intervals.of(interval);
     }
 
     for (DataSegment segment : segments) {
@@ -224,6 +257,7 @@ public class ClientInfoResource
   @GET
   @Path("/{dataSourceName}/metrics")
   @Produces(MediaType.APPLICATION_JSON)
+  @ResourceFilters(DatasourceResourceFilter.class)
   public Iterable<String> getDatasourceMetrics(
       @PathParam("dataSourceName") String dataSourceName,
       @QueryParam("interval") String interval
@@ -241,7 +275,7 @@ public class ClientInfoResource
       DateTime now = getCurrentTime();
       theInterval = new Interval(segmentMetadataQueryConfig.getDefaultHistory(), now);
     } else {
-      theInterval = new Interval(interval);
+      theInterval = Intervals.of(interval);
     }
 
     for (DataSegment segment : segments) {
@@ -253,9 +287,28 @@ public class ClientInfoResource
     return metrics;
   }
 
+  @GET
+  @Path("/{dataSourceName}/candidates")
+  @Produces(MediaType.APPLICATION_JSON)
+  @ResourceFilters(DatasourceResourceFilter.class)
+  public Iterable<LocatedSegmentDescriptor> getQueryTargets(
+      @PathParam("dataSourceName") String datasource,
+      @QueryParam("intervals") String intervals,
+      @QueryParam("numCandidates") @DefaultValue("-1") int numCandidates,
+      @Context final HttpServletRequest req
+  ) throws IOException
+  {
+    List<Interval> intervalList = Lists.newArrayList();
+    for (String interval : intervals.split(",")) {
+      intervalList.add(Intervals.of(interval.trim()));
+    }
+    List<Interval> condensed = JodaUtils.condenseIntervals(intervalList);
+    return ServerViewUtil.getTargetLocations(timelineServerView, datasource, condensed, numCandidates);
+  }
+
   protected DateTime getCurrentTime()
   {
-    return new DateTime();
+    return DateTimes.nowUtc();
   }
 
 

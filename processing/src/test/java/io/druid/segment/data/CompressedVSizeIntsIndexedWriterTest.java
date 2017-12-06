@@ -23,7 +23,17 @@ import com.google.common.base.Function;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
 import com.google.common.primitives.Ints;
-import com.metamx.common.guava.CloseQuietly;
+import com.google.common.primitives.Longs;
+import io.druid.java.util.common.guava.CloseQuietly;
+import io.druid.java.util.common.io.smoosh.FileSmoosher;
+import io.druid.java.util.common.io.smoosh.Smoosh;
+import io.druid.java.util.common.io.smoosh.SmooshedFileMapper;
+import io.druid.java.util.common.io.smoosh.SmooshedWriter;
+import io.druid.segment.writeout.OffHeapMemorySegmentWriteOutMedium;
+import io.druid.segment.writeout.SegmentWriteOutMedium;
+import io.druid.segment.writeout.WriteOutBytes;
+import it.unimi.dsi.fastutil.ints.IntArrayList;
+import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
 import org.junit.After;
 import org.junit.Before;
@@ -31,11 +41,10 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.nio.channels.Channels;
-import java.nio.channels.WritableByteChannel;
 import java.util.List;
 import java.util.Random;
 import java.util.Set;
@@ -45,11 +54,26 @@ import static org.junit.Assert.assertEquals;
 @RunWith(Parameterized.class)
 public class CompressedVSizeIntsIndexedWriterTest
 {
+  private static final int[] MAX_VALUES = new int[]{0xFF, 0xFFFF, 0xFFFFFF, 0x0FFFFFFF};
+  private final SegmentWriteOutMedium segmentWriteOutMedium = new OffHeapMemorySegmentWriteOutMedium();
+  private final CompressionStrategy compressionStrategy;
+  private final ByteOrder byteOrder;
+  private final Random rand = new Random(0);
+  private int[] vals;
+  public CompressedVSizeIntsIndexedWriterTest(
+      CompressionStrategy compressionStrategy,
+      ByteOrder byteOrder
+  )
+  {
+    this.compressionStrategy = compressionStrategy;
+    this.byteOrder = byteOrder;
+  }
+
   @Parameterized.Parameters(name = "{index}: compression={0}, byteOrder={1}")
   public static Iterable<Object[]> compressionStrategiesAndByteOrders()
   {
     Set<List<Object>> combinations = Sets.cartesianProduct(
-        Sets.newHashSet(CompressedObjectStrategy.CompressionStrategy.values()),
+        Sets.newHashSet(CompressionStrategy.noNoneValues()),
         Sets.newHashSet(ByteOrder.BIG_ENDIAN, ByteOrder.LITTLE_ENDIAN)
     );
 
@@ -65,23 +89,6 @@ public class CompressedVSizeIntsIndexedWriterTest
     );
   }
 
-  private static final int[] MAX_VALUES = new int[]{0xFF, 0xFFFF, 0xFFFFFF, 0x0FFFFFFF};
-
-  private final IOPeon ioPeon = new TmpFileIOPeon();
-  private final CompressedObjectStrategy.CompressionStrategy compressionStrategy;
-  private final ByteOrder byteOrder;
-  private final Random rand = new Random(0);
-  private int[] vals;
-
-  public CompressedVSizeIntsIndexedWriterTest(
-      CompressedObjectStrategy.CompressionStrategy compressionStrategy,
-      ByteOrder byteOrder
-  )
-  {
-    this.compressionStrategy = compressionStrategy;
-    this.byteOrder = byteOrder;
-  }
-
   @Before
   public void setUp() throws Exception
   {
@@ -91,7 +98,7 @@ public class CompressedVSizeIntsIndexedWriterTest
   @After
   public void tearDown() throws Exception
   {
-    ioPeon.cleanup();
+    segmentWriteOutMedium.close();
   }
 
   private void generateVals(final int totalSize, final int maxValue) throws IOException
@@ -104,27 +111,39 @@ public class CompressedVSizeIntsIndexedWriterTest
 
   private void checkSerializedSizeAndData(int chunkSize) throws Exception
   {
+    FileSmoosher smoosher = new FileSmoosher(FileUtils.getTempDirectory());
+
     CompressedVSizeIntsIndexedWriter writer = new CompressedVSizeIntsIndexedWriter(
-        ioPeon, "test", vals.length > 0 ? Ints.max(vals) : 0, chunkSize, byteOrder, compressionStrategy
+        segmentWriteOutMedium,
+        "test",
+        vals.length > 0 ? Ints.max(vals) : 0,
+        chunkSize,
+        byteOrder,
+        compressionStrategy
     );
     CompressedVSizeIntsIndexedSupplier supplierFromList = CompressedVSizeIntsIndexedSupplier.fromList(
-        Ints.asList(vals), vals.length > 0 ? Ints.max(vals) : 0, chunkSize, byteOrder, compressionStrategy
+        IntArrayList.wrap(vals),
+        vals.length > 0 ? Ints.max(vals) : 0,
+        chunkSize,
+        byteOrder,
+        compressionStrategy,
+        segmentWriteOutMedium.getCloser()
     );
     writer.open();
     for (int val : vals) {
       writer.add(val);
     }
-    writer.close();
     long writtenLength = writer.getSerializedSize();
-    final WritableByteChannel outputChannel = Channels.newChannel(ioPeon.makeOutputStream("output"));
-    writer.writeToChannel(outputChannel);
-    outputChannel.close();
+    final WriteOutBytes writeOutBytes = segmentWriteOutMedium.makeWriteOutBytes();
+    writer.writeTo(writeOutBytes, smoosher);
+    smoosher.close();
 
     assertEquals(writtenLength, supplierFromList.getSerializedSize());
 
     // read from ByteBuffer and check values
     CompressedVSizeIntsIndexedSupplier supplierFromByteBuffer = CompressedVSizeIntsIndexedSupplier.fromByteBuffer(
-        ByteBuffer.wrap(IOUtils.toByteArray(ioPeon.makeInputStream("output"))), byteOrder
+        ByteBuffer.wrap(IOUtils.toByteArray(writeOutBytes.asInputStream())),
+        byteOrder
     );
     IndexedInts indexedInts = supplierFromByteBuffer.get();
     for (int i = 0; i < vals.length; ++i) {
@@ -161,4 +180,62 @@ public class CompressedVSizeIntsIndexedWriterTest
     vals = new int[0];
     checkSerializedSizeAndData(2);
   }
+
+  private void checkV2SerializedSizeAndData(int chunkSize) throws Exception
+  {
+    File tmpDirectory = FileUtils.getTempDirectory();
+    FileSmoosher smoosher = new FileSmoosher(tmpDirectory);
+
+    GenericIndexedWriter genericIndexed = GenericIndexedWriter.ofCompressedByteBuffers(
+        segmentWriteOutMedium,
+        "test",
+        compressionStrategy,
+        Longs.BYTES * 10000
+    );
+    CompressedVSizeIntsIndexedWriter writer = new CompressedVSizeIntsIndexedWriter(
+        segmentWriteOutMedium,
+        vals.length > 0 ? Ints.max(vals) : 0,
+        chunkSize,
+        byteOrder,
+        compressionStrategy,
+        genericIndexed
+    );
+    writer.open();
+    for (int val : vals) {
+      writer.add(val);
+    }
+
+    final SmooshedWriter channel = smoosher.addWithSmooshedWriter(
+        "test",
+        writer.getSerializedSize()
+    );
+    writer.writeTo(channel, smoosher);
+    channel.close();
+    smoosher.close();
+
+    SmooshedFileMapper mapper = Smoosh.map(tmpDirectory);
+
+    CompressedVSizeIntsIndexedSupplier supplierFromByteBuffer = CompressedVSizeIntsIndexedSupplier.fromByteBuffer(
+        mapper.mapFile("test"),
+        byteOrder
+    );
+
+    IndexedInts indexedInts = supplierFromByteBuffer.get();
+    for (int i = 0; i < vals.length; ++i) {
+      assertEquals(vals[i], indexedInts.get(i));
+    }
+    CloseQuietly.close(indexedInts);
+    mapper.close();
+  }
+
+  @Test
+  public void testMultiValueFileLargeData() throws Exception
+  {
+    for (int maxValue : MAX_VALUES) {
+      final int maxChunkSize = CompressedVSizeIntsIndexedSupplier.maxIntsInBufferForValue(maxValue);
+      generateVals((rand.nextInt(5) + 5) * maxChunkSize + rand.nextInt(maxChunkSize), maxValue);
+      checkV2SerializedSizeAndData(maxChunkSize);
+    }
+  }
+
 }

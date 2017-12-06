@@ -19,17 +19,15 @@
 
 package io.druid.segment;
 
-import java.io.Closeable;
+import io.druid.guice.annotations.ExtensionPoint;
+import io.druid.segment.serde.Serializer;
+
 import java.io.IOException;
-import java.nio.channels.WritableByteChannel;
 
-public interface GenericColumnSerializer extends Closeable
+@ExtensionPoint
+public interface GenericColumnSerializer extends Serializer
 {
-  public void open() throws IOException;
+  void open() throws IOException;
 
-  public void serialize(Object obj) throws IOException;
-
-  public long getSerializedSize();
-
-  public void writeToChannel(WritableByteChannel channel) throws IOException;
+  void serialize(Object obj) throws IOException;
 }

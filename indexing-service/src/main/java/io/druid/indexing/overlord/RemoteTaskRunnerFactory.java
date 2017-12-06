@@ -22,38 +22,30 @@ package io.druid.indexing.overlord;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Supplier;
 import com.google.inject.Inject;
-import com.metamx.common.concurrent.ScheduledExecutorFactory;
-import com.metamx.common.logger.Logger;
 import com.metamx.http.client.HttpClient;
-import io.druid.curator.cache.SimplePathChildrenCacheFactory;
-import io.druid.guice.annotations.Global;
-import io.druid.indexing.overlord.autoscaling.NoopResourceManagementStrategy;
-import io.druid.indexing.overlord.autoscaling.ResourceManagementSchedulerConfig;
-import io.druid.indexing.overlord.autoscaling.ResourceManagementStrategy;
-import io.druid.indexing.overlord.autoscaling.SimpleResourceManagementConfig;
-import io.druid.indexing.overlord.autoscaling.SimpleResourceManagementStrategy;
+import io.druid.curator.cache.PathChildrenCacheFactory;
+import io.druid.guice.annotations.EscalatedGlobal;
+import io.druid.indexing.overlord.autoscaling.NoopProvisioningStrategy;
+import io.druid.indexing.overlord.autoscaling.ProvisioningSchedulerConfig;
+import io.druid.indexing.overlord.autoscaling.ProvisioningStrategy;
 import io.druid.indexing.overlord.config.RemoteTaskRunnerConfig;
 import io.druid.indexing.overlord.setup.WorkerBehaviorConfig;
 import io.druid.server.initialization.IndexerZkConfig;
 import org.apache.curator.framework.CuratorFramework;
 
-import java.util.concurrent.ScheduledExecutorService;
-
 /**
  */
 public class RemoteTaskRunnerFactory implements TaskRunnerFactory<RemoteTaskRunner>
 {
-  private static final Logger LOG = new Logger(RemoteTaskRunnerFactory.class);
+  public static final String TYPE_NAME = "remote";
   private final CuratorFramework curator;
   private final RemoteTaskRunnerConfig remoteTaskRunnerConfig;
   private final IndexerZkConfig zkPaths;
   private final ObjectMapper jsonMapper;
   private final HttpClient httpClient;
   private final Supplier<WorkerBehaviorConfig> workerConfigRef;
-  private final ScheduledExecutorService cleanupExec;
-  private final SimpleResourceManagementConfig config;
-  private final ResourceManagementSchedulerConfig resourceManagementSchedulerConfig;
-  private final ScheduledExecutorService resourceManagementExec;
+  private final ProvisioningSchedulerConfig provisioningSchedulerConfig;
+  private final ProvisioningStrategy provisioningStrategy;
 
   @Inject
   public RemoteTaskRunnerFactory(
@@ -61,11 +53,10 @@ public class RemoteTaskRunnerFactory implements TaskRunnerFactory<RemoteTaskRunn
       final RemoteTaskRunnerConfig remoteTaskRunnerConfig,
       final IndexerZkConfig zkPaths,
       final ObjectMapper jsonMapper,
-      @Global final HttpClient httpClient,
+      @EscalatedGlobal final HttpClient httpClient,
       final Supplier<WorkerBehaviorConfig> workerConfigRef,
-      final ScheduledExecutorFactory factory,
-      final SimpleResourceManagementConfig config,
-      final ResourceManagementSchedulerConfig resourceManagementSchedulerConfig
+      final ProvisioningSchedulerConfig provisioningSchedulerConfig,
+      final ProvisioningStrategy provisioningStrategy
   )
   {
     this.curator = curator;
@@ -74,39 +65,22 @@ public class RemoteTaskRunnerFactory implements TaskRunnerFactory<RemoteTaskRunn
     this.jsonMapper = jsonMapper;
     this.httpClient = httpClient;
     this.workerConfigRef = workerConfigRef;
-    this.cleanupExec = factory.create(1, "RemoteTaskRunner-Scheduled-Cleanup--%d");
-    this.config = config;
-    this.resourceManagementSchedulerConfig = resourceManagementSchedulerConfig;
-    this.resourceManagementExec = factory.create(1, "RemoteTaskRunner-ResourceManagement--%d");
+    this.provisioningSchedulerConfig = provisioningSchedulerConfig;
+    this.provisioningStrategy = provisioningStrategy;
   }
 
   @Override
   public RemoteTaskRunner build()
   {
-    final ResourceManagementStrategy<RemoteTaskRunner> resourceManagementStrategy;
-    if (resourceManagementSchedulerConfig.isDoAutoscale()) {
-      resourceManagementStrategy = new SimpleResourceManagementStrategy(
-          config,
-          workerConfigRef,
-          resourceManagementSchedulerConfig,
-          resourceManagementExec
-      );
-    } else {
-      resourceManagementStrategy = new NoopResourceManagementStrategy<>();
-    }
     return new RemoteTaskRunner(
         jsonMapper,
         remoteTaskRunnerConfig,
         zkPaths,
         curator,
-        new SimplePathChildrenCacheFactory
-            .Builder()
-            .withCompressed(true)
-            .build(),
+        new PathChildrenCacheFactory.Builder().withCompressed(true),
         httpClient,
         workerConfigRef,
-        cleanupExec,
-        resourceManagementStrategy
+        provisioningSchedulerConfig.isDoAutoscale() ? provisioningStrategy : new NoopProvisioningStrategy<>()
     );
   }
 }

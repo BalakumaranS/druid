@@ -19,37 +19,31 @@
 
 package io.druid.indexing.common.actions;
 
-import com.google.common.base.Preconditions;
-import com.google.common.base.Predicate;
-import com.google.common.collect.Iterables;
 import com.google.inject.Inject;
-import com.metamx.common.ISE;
 import com.metamx.emitter.service.ServiceEmitter;
-import io.druid.indexing.common.TaskLock;
-import io.druid.indexing.common.task.Task;
 import io.druid.indexing.overlord.IndexerMetadataStorageCoordinator;
 import io.druid.indexing.overlord.TaskLockbox;
-import io.druid.timeline.DataSegment;
-
-import java.util.List;
-import java.util.Set;
+import io.druid.indexing.overlord.supervisor.SupervisorManager;
 
 public class TaskActionToolbox
 {
   private final TaskLockbox taskLockbox;
   private final IndexerMetadataStorageCoordinator indexerMetadataStorageCoordinator;
   private final ServiceEmitter emitter;
+  private final SupervisorManager supervisorManager;
 
   @Inject
   public TaskActionToolbox(
       TaskLockbox taskLockbox,
       IndexerMetadataStorageCoordinator indexerMetadataStorageCoordinator,
-      ServiceEmitter emitter
+      ServiceEmitter emitter,
+      SupervisorManager supervisorManager
   )
   {
     this.taskLockbox = taskLockbox;
     this.indexerMetadataStorageCoordinator = indexerMetadataStorageCoordinator;
     this.emitter = emitter;
+    this.supervisorManager = supervisorManager;
   }
 
   public TaskLockbox getTaskLockbox()
@@ -67,47 +61,8 @@ public class TaskActionToolbox
     return emitter;
   }
 
-  public void verifyTaskLocks(
-      final Task task,
-      final Set<DataSegment> segments
-  )
+  public SupervisorManager getSupervisorManager()
   {
-    if (!taskLockCoversSegments(task, segments)) {
-      throw new ISE("Segments not covered by locks for task: %s", task.getId());
-    }
-  }
-
-  public boolean taskLockCoversSegments(
-      final Task task,
-      final Set<DataSegment> segments
-  )
-  {
-    // Verify that each of these segments falls under some lock
-
-    // NOTE: It is possible for our lock to be revoked (if the task has failed and given up its locks) after we check
-    // NOTE: it and before we perform the segment insert, but, that should be OK since the worst that happens is we
-    // NOTE: insert some segments from the task but not others.
-
-    final List<TaskLock> taskLocks = getTaskLockbox().findLocksForTask(task);
-    for (final DataSegment segment : segments) {
-      final boolean ok = Iterables.any(
-          taskLocks, new Predicate<TaskLock>()
-          {
-            @Override
-            public boolean apply(TaskLock taskLock)
-            {
-              return taskLock.getDataSource().equals(segment.getDataSource())
-                     && taskLock.getInterval().contains(segment.getInterval())
-                     && taskLock.getVersion().compareTo(segment.getVersion()) >= 0;
-            }
-          }
-      );
-
-      if (!ok) {
-        return false;
-      }
-    }
-
-    return true;
+    return supervisorManager;
   }
 }

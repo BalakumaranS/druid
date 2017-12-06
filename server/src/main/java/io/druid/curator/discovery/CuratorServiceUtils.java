@@ -19,6 +19,10 @@
 
 package io.druid.curator.discovery;
 
+/**
+ * This class is only used by Deprecated classes.
+ */
+@Deprecated
 public class CuratorServiceUtils
 {
   /**
@@ -30,13 +34,14 @@ public class CuratorServiceUtils
    * Mapping the actual service name to the name used within curator should be left to {@link CuratorServiceAnnouncer}
    * and {@link ServerDiscoveryFactory}
    *
-   * @see io.druid.curator.discovery.CuratorServiceAnnouncer
-   * @see io.druid.curator.discovery.ServerDiscoveryFactory
+   * @see CuratorServiceAnnouncer
+   * @see ServerDiscoveryFactory
    *
    * @param serviceName
    * @return
    */
-  protected static String makeCanonicalServiceName(String serviceName) {
+  protected static String makeCanonicalServiceName(String serviceName)
+  {
     return serviceName.replaceAll("/", ":");
   }
 }

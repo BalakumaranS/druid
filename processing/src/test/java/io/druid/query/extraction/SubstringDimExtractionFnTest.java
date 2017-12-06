@@ -18,14 +18,13 @@
  */
 
 package io.druid.query.extraction;
-import com.google.common.collect.Sets;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.druid.jackson.DefaultObjectMapper;
 import org.junit.Assert;
 import org.junit.Test;
 
 import java.util.Arrays;
-import java.util.Set;
 
 /**
  */
@@ -43,14 +42,16 @@ public class SubstringDimExtractionFnTest
   }
 
   @Test (expected = IllegalArgumentException.class)
-  public void testZeroLength() {
-    ExtractionFn extractionFnNoLength = new SubstringDimExtractionFn(1,0);
+  public void testZeroLength()
+  {
+    @SuppressWarnings("unused") // expected exception
+    ExtractionFn extractionFnNoLength = new SubstringDimExtractionFn(1, 0);
   }
 
   @Test
   public void testNoLength()
   {
-    ExtractionFn extractionFnNoLength = new SubstringDimExtractionFn(1,null);
+    ExtractionFn extractionFnNoLength = new SubstringDimExtractionFn(1, null);
 
     // 0 length substring returns remainder
     Assert.assertEquals("abcdef", extractionFnNoLength.apply("/abcdef"));
@@ -62,9 +63,9 @@ public class SubstringDimExtractionFnTest
   @Test
   public void testGetCacheKey()
   {
-    ExtractionFn extractionFn1 = new SubstringDimExtractionFn(2,4);
-    ExtractionFn extractionFn2 = new SubstringDimExtractionFn(2,4);
-    ExtractionFn extractionFn3 = new SubstringDimExtractionFn(1,4);
+    ExtractionFn extractionFn1 = new SubstringDimExtractionFn(2, 4);
+    ExtractionFn extractionFn2 = new SubstringDimExtractionFn(2, 4);
+    ExtractionFn extractionFn3 = new SubstringDimExtractionFn(1, 4);
 
     Assert.assertArrayEquals(extractionFn1.getCacheKey(), extractionFn2.getCacheKey());
 
@@ -74,9 +75,9 @@ public class SubstringDimExtractionFnTest
   @Test
   public void testHashCode()
   {
-    ExtractionFn extractionFn1 = new SubstringDimExtractionFn(2,4);
-    ExtractionFn extractionFn2 = new SubstringDimExtractionFn(2,4);
-    ExtractionFn extractionFn3 = new SubstringDimExtractionFn(1,4);
+    ExtractionFn extractionFn1 = new SubstringDimExtractionFn(2, 4);
+    ExtractionFn extractionFn2 = new SubstringDimExtractionFn(2, 4);
+    ExtractionFn extractionFn3 = new SubstringDimExtractionFn(1, 4);
 
     Assert.assertEquals(extractionFn1.hashCode(), extractionFn2.hashCode());
 
@@ -86,7 +87,7 @@ public class SubstringDimExtractionFnTest
   @Test
   public void testNullAndEmpty()
   {
-    ExtractionFn extractionFn = new SubstringDimExtractionFn(2,4);
+    ExtractionFn extractionFn = new SubstringDimExtractionFn(2, 4);
     // no match, map empty input value to null
     Assert.assertEquals(null, extractionFn.apply(""));
     // null value, returns null

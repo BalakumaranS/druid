@@ -32,8 +32,6 @@ import java.util.List;
 
 public class FilteredAggregatorFactory extends AggregatorFactory
 {
-  private static final byte CACHE_TYPE_ID = 0x9;
-
   private final AggregatorFactory delegate;
   private final DimFilter filter;
 
@@ -52,18 +50,17 @@ public class FilteredAggregatorFactory extends AggregatorFactory
   @Override
   public Aggregator factorize(ColumnSelectorFactory columnSelectorFactory)
   {
-    final ValueMatcher valueMatcher = Filters.convertDimensionFilters(filter).makeMatcher(columnSelectorFactory);
-      return new FilteredAggregator(
-          valueMatcher,
-          delegate.factorize(columnSelectorFactory)
-      );
-
+    final ValueMatcher valueMatcher = Filters.toFilter(filter).makeMatcher(columnSelectorFactory);
+    return new FilteredAggregator(
+        valueMatcher,
+        delegate.factorize(columnSelectorFactory)
+    );
   }
 
   @Override
   public BufferAggregator factorizeBuffered(ColumnSelectorFactory columnSelectorFactory)
   {
-    final ValueMatcher valueMatcher = Filters.convertDimensionFilters(filter).makeMatcher(columnSelectorFactory);
+    final ValueMatcher valueMatcher = Filters.toFilter(filter).makeMatcher(columnSelectorFactory);
     return new FilteredBufferAggregator(
         valueMatcher,
         delegate.factorizeBuffered(columnSelectorFactory)
@@ -80,6 +77,12 @@ public class FilteredAggregatorFactory extends AggregatorFactory
   public Object combine(Object lhs, Object rhs)
   {
     return delegate.combine(lhs, rhs);
+  }
+
+  @Override
+  public AggregateCombiner makeAggregateCombiner()
+  {
+    return delegate.makeAggregateCombiner();
   }
 
   @Override
@@ -119,7 +122,7 @@ public class FilteredAggregatorFactory extends AggregatorFactory
     byte[] filterCacheKey = filter.getCacheKey();
     byte[] aggregatorCacheKey = delegate.getCacheKey();
     return ByteBuffer.allocate(1 + filterCacheKey.length + aggregatorCacheKey.length)
-                     .put(CACHE_TYPE_ID)
+                     .put(AggregatorUtil.FILTERED_AGG_CACHE_TYPE_ID)
                      .put(filterCacheKey)
                      .put(aggregatorCacheKey)
                      .array();
@@ -135,12 +138,6 @@ public class FilteredAggregatorFactory extends AggregatorFactory
   public int getMaxIntermediateSize()
   {
     return delegate.getMaxIntermediateSize();
-  }
-
-  @Override
-  public Object getAggregatorStartValue()
-  {
-    return delegate.getAggregatorStartValue();
   }
 
   @JsonProperty
@@ -165,7 +162,7 @@ public class FilteredAggregatorFactory extends AggregatorFactory
   public String toString()
   {
     return "FilteredAggregatorFactory{" +
-           ", delegate=" + delegate +
+           "delegate=" + delegate +
            ", filter=" + filter +
            '}';
   }

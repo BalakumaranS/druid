@@ -27,26 +27,28 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.primitives.Ints;
 import com.google.inject.Inject;
-import com.metamx.common.IAE;
-import com.metamx.common.ISE;
-import com.metamx.common.guava.BaseSequence;
-import com.metamx.common.guava.CloseQuietly;
-import com.metamx.common.guava.FunctionalIterator;
-import com.metamx.common.guava.Sequence;
-import com.metamx.common.guava.Sequences;
-import com.metamx.common.parsers.CloseableIterator;
+import io.druid.collections.NonBlockingPool;
 import io.druid.collections.ResourceHolder;
-import io.druid.collections.StupidPool;
 import io.druid.data.input.MapBasedRow;
 import io.druid.data.input.Row;
 import io.druid.guice.annotations.Global;
+import io.druid.java.util.common.IAE;
+import io.druid.java.util.common.ISE;
+import io.druid.java.util.common.guava.BaseSequence;
+import io.druid.java.util.common.guava.CloseQuietly;
+import io.druid.java.util.common.guava.FunctionalIterator;
+import io.druid.java.util.common.guava.Sequence;
+import io.druid.java.util.common.guava.Sequences;
+import io.druid.java.util.common.parsers.CloseableIterator;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.BufferAggregator;
 import io.druid.query.aggregation.PostAggregator;
 import io.druid.query.dimension.DimensionSpec;
+import io.druid.query.filter.Filter;
 import io.druid.segment.Cursor;
 import io.druid.segment.DimensionSelector;
 import io.druid.segment.StorageAdapter;
+import io.druid.segment.column.ValueType;
 import io.druid.segment.data.IndexedInts;
 import io.druid.segment.filter.Filters;
 import org.joda.time.DateTime;
@@ -66,13 +68,15 @@ import java.util.NoSuchElementException;
  */
 public class GroupByQueryEngine
 {
+  private static final int MISSING_VALUE = -1;
+
   private final Supplier<GroupByQueryConfig> config;
-  private final StupidPool<ByteBuffer> intermediateResultsBufferPool;
+  private final NonBlockingPool<ByteBuffer> intermediateResultsBufferPool;
 
   @Inject
   public GroupByQueryEngine(
       Supplier<GroupByQueryConfig> config,
-      @Global StupidPool<ByteBuffer> intermediateResultsBufferPool
+      @Global NonBlockingPool<ByteBuffer> intermediateResultsBufferPool
   )
   {
     this.config = config;
@@ -92,11 +96,15 @@ public class GroupByQueryEngine
       throw new IAE("Should only have one interval, got[%s]", intervals);
     }
 
+    Filter filter = Filters.convertToCNFFromQueryContext(query, Filters.toFilter(query.getDimFilter()));
+
     final Sequence<Cursor> cursors = storageAdapter.makeCursors(
-        Filters.convertDimensionFilters(query.getDimFilter()),
+        filter,
         intervals.get(0),
+        query.getVirtualColumns(),
         query.getGranularity(),
-        false
+        false,
+        null
     );
 
     final ResourceHolder<ByteBuffer> bufferHolder = intermediateResultsBufferPool.take();
@@ -185,11 +193,12 @@ public class GroupByQueryEngine
         final IndexedInts row = dimSelector.getRow();
         if (row == null || row.size() == 0) {
           ByteBuffer newKey = key.duplicate();
-          newKey.putInt(dimSelector.getValueCardinality());
+          newKey.putInt(MISSING_VALUE);
           unaggregatedBuffers = updateValues(newKey, dims.subList(1, dims.size()));
         } else {
-          for (Integer dimValue : row) {
+          for (int i = 0; i < row.size(); i++) {
             ByteBuffer newKey = key.duplicate();
+            int dimValue = row.get(i);
             newKey.putInt(dimValue);
             unaggregatedBuffers = updateValues(newKey, dims.subList(1, dims.size()));
           }
@@ -254,8 +263,8 @@ public class GroupByQueryEngine
       this.increments = increments;
 
       int theIncrement = 0;
-      for (int i = 0; i < increments.length; i++) {
-        theIncrement += increments[i];
+      for (int inc : increments) {
+        theIncrement += inc;
       }
       increment = theIncrement;
 
@@ -289,7 +298,7 @@ public class GroupByQueryEngine
     private final GroupByQuery query;
     private final Cursor cursor;
     private final ByteBuffer metricsBuffer;
-    private final GroupByQueryConfig config;
+    private final int maxIntermediateRows;
 
     private final List<DimensionSpec> dimensionSpecs;
     private final List<DimensionSelector> dimensions;
@@ -304,10 +313,12 @@ public class GroupByQueryEngine
 
     public RowIterator(GroupByQuery query, final Cursor cursor, ByteBuffer metricsBuffer, GroupByQueryConfig config)
     {
+      final GroupByQueryConfig querySpecificConfig = config.withOverrides(query);
+
       this.query = query;
       this.cursor = cursor;
       this.metricsBuffer = metricsBuffer;
-      this.config = config;
+      this.maxIntermediateRows = querySpecificConfig.getMaxIntermediateRows();
 
       unprocessedKeys = null;
       delegate = Iterators.emptyIterator();
@@ -315,10 +326,19 @@ public class GroupByQueryEngine
       dimensions = Lists.newArrayListWithExpectedSize(dimensionSpecs.size());
       dimNames = Lists.newArrayListWithExpectedSize(dimensionSpecs.size());
 
-      for (int i = 0; i < dimensionSpecs.size(); ++i) {
-        final DimensionSpec dimSpec = dimensionSpecs.get(i);
-        final DimensionSelector selector = cursor.makeDimensionSelector(dimSpec);
+      for (final DimensionSpec dimSpec : dimensionSpecs) {
+        if (dimSpec.getOutputType() != ValueType.STRING) {
+          throw new UnsupportedOperationException(
+              "GroupBy v1 only supports dimensions with an outputType of STRING."
+          );
+        }
+
+        final DimensionSelector selector = cursor.getColumnSelectorFactory().makeDimensionSelector(dimSpec);
         if (selector != null) {
+          if (selector.getValueCardinality() == DimensionSelector.CARDINALITY_UNKNOWN) {
+            throw new UnsupportedOperationException(
+                "GroupBy v1 does not support dimension selectors with unknown cardinality.");
+          }
           dimensions.add(selector);
           dimNames.add(dimSpec.getOutputName());
         }
@@ -330,7 +350,7 @@ public class GroupByQueryEngine
       sizesRequired = new int[aggregatorSpecs.size()];
       for (int i = 0; i < aggregatorSpecs.size(); ++i) {
         AggregatorFactory aggregatorSpec = aggregatorSpecs.get(i);
-        aggregators[i] = aggregatorSpec.factorizeBuffered(cursor);
+        aggregators[i] = aggregatorSpec.factorizeBuffered(cursor.getColumnSelectorFactory());
         metricNames[i] = aggregatorSpec.getName();
         sizesRequired[i] = aggregatorSpec.getMaxIntermediateSize();
       }
@@ -364,7 +384,7 @@ public class GroupByQueryEngine
         }
         cursor.advance();
       }
-      while (!cursor.isDone() && rowUpdater.getNumRows() < config.getMaxIntermediateRows()) {
+      while (!cursor.isDone() && rowUpdater.getNumRows() < maxIntermediateRows) {
         ByteBuffer key = ByteBuffer.allocate(dimensions.size() * Ints.BYTES);
 
         unprocessedKeys = rowUpdater.updateValues(key, dimensions);
@@ -399,7 +419,7 @@ public class GroupByQueryEngine
                   for (int i = 0; i < dimensions.size(); ++i) {
                     final DimensionSelector dimSelector = dimensions.get(i);
                     final int dimVal = keyBuffer.getInt();
-                    if (dimSelector.getValueCardinality() != dimVal) {
+                    if (MISSING_VALUE != dimVal) {
                       theEvent.put(dimNames.get(i), dimSelector.lookupName(dimVal));
                     }
                   }
@@ -428,6 +448,7 @@ public class GroupByQueryEngine
       throw new UnsupportedOperationException();
     }
 
+    @Override
     public void close()
     {
       // cleanup

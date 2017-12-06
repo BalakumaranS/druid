@@ -31,18 +31,23 @@ import com.google.common.collect.Maps;
 import com.google.common.collect.Ordering;
 import com.google.common.collect.Sets;
 import com.google.inject.Inject;
-import com.metamx.common.guava.MappedSequence;
-import com.metamx.common.guava.Sequence;
-import com.metamx.common.guava.nary.BinaryFn;
-import com.metamx.emitter.service.ServiceMetricEvent;
 import io.druid.common.guava.CombiningSequence;
-import io.druid.common.utils.JodaUtils;
+import io.druid.java.util.common.JodaUtils;
+import io.druid.data.input.impl.TimestampSpec;
+import io.druid.java.util.common.granularity.Granularity;
+import io.druid.java.util.common.guava.Comparators;
+import io.druid.java.util.common.guava.MappedSequence;
+import io.druid.java.util.common.guava.Sequence;
+import io.druid.java.util.common.guava.nary.BinaryFn;
+import io.druid.query.BySegmentSkippingQueryRunner;
 import io.druid.query.CacheStrategy;
-import io.druid.query.DruidMetrics;
+import io.druid.query.DefaultGenericQueryMetricsFactory;
+import io.druid.query.GenericQueryMetricsFactory;
 import io.druid.query.Query;
+import io.druid.query.QueryMetrics;
+import io.druid.query.QueryPlus;
 import io.druid.query.QueryRunner;
 import io.druid.query.QueryToolChest;
-import io.druid.query.ResultMergeQueryRunner;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.AggregatorFactoryNotMergeableException;
 import io.druid.query.aggregation.MetricManipulationFn;
@@ -76,68 +81,66 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
   };
 
   private final SegmentMetadataQueryConfig config;
+  private final GenericQueryMetricsFactory queryMetricsFactory;
+
+  @VisibleForTesting
+  public SegmentMetadataQueryQueryToolChest(SegmentMetadataQueryConfig config)
+  {
+    this(config, DefaultGenericQueryMetricsFactory.instance());
+  }
 
   @Inject
   public SegmentMetadataQueryQueryToolChest(
-      SegmentMetadataQueryConfig config
+      SegmentMetadataQueryConfig config,
+      GenericQueryMetricsFactory queryMetricsFactory
   )
   {
     this.config = config;
+    this.queryMetricsFactory = queryMetricsFactory;
   }
 
   @Override
   public QueryRunner<SegmentAnalysis> mergeResults(final QueryRunner<SegmentAnalysis> runner)
   {
-    return new ResultMergeQueryRunner<SegmentAnalysis>(runner)
+    return new BySegmentSkippingQueryRunner<SegmentAnalysis>(runner)
     {
       @Override
       public Sequence<SegmentAnalysis> doRun(
           QueryRunner<SegmentAnalysis> baseRunner,
-          Query<SegmentAnalysis> query,
+          QueryPlus<SegmentAnalysis> queryPlus,
           Map<String, Object> context
       )
       {
+        SegmentMetadataQuery updatedQuery = ((SegmentMetadataQuery) queryPlus.getQuery()).withFinalizedAnalysisTypes(config);
+        QueryPlus<SegmentAnalysis> updatedQueryPlus = queryPlus.withQuery(updatedQuery);
         return new MappedSequence<>(
             CombiningSequence.create(
-                baseRunner.run(query, context),
-                makeOrdering(query),
-                createMergeFn(query)
+                baseRunner.run(updatedQueryPlus, context),
+                makeOrdering(updatedQuery),
+                createMergeFn(updatedQuery)
             ),
-            MERGE_TRANSFORM_FN
+            MERGE_TRANSFORM_FN::apply
         );
       }
 
-      @Override
-      protected Ordering<SegmentAnalysis> makeOrdering(Query<SegmentAnalysis> query)
+      private Ordering<SegmentAnalysis> makeOrdering(SegmentMetadataQuery query)
       {
-        if (((SegmentMetadataQuery) query).isMerge()) {
+        if (query.isMerge()) {
           // Merge everything always
-          return new Ordering<SegmentAnalysis>()
-          {
-            @Override
-            public int compare(
-                @Nullable SegmentAnalysis left, @Nullable SegmentAnalysis right
-            )
-            {
-              return 0;
-            }
-          };
+          return Comparators.alwaysEqual();
         }
 
         return query.getResultOrdering(); // No two elements should be equal, so it should never merge
       }
 
-      @Override
-      protected BinaryFn<SegmentAnalysis, SegmentAnalysis, SegmentAnalysis> createMergeFn(final Query<SegmentAnalysis> inQ)
+      private BinaryFn<SegmentAnalysis, SegmentAnalysis, SegmentAnalysis> createMergeFn(final SegmentMetadataQuery inQ)
       {
         return new BinaryFn<SegmentAnalysis, SegmentAnalysis, SegmentAnalysis>()
         {
-          private final SegmentMetadataQuery query = (SegmentMetadataQuery) inQ;
-
           @Override
           public SegmentAnalysis apply(SegmentAnalysis arg1, SegmentAnalysis arg2)
           {
-            return mergeAnalyses(arg1, arg2, query.isLenientAggregatorMerge());
+            return mergeAnalyses(arg1, arg2, inQ.isLenientAggregatorMerge());
           }
         };
       }
@@ -145,9 +148,9 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
   }
 
   @Override
-  public ServiceMetricEvent.Builder makeMetricBuilder(SegmentMetadataQuery query)
+  public QueryMetrics<Query<?>> makeMetrics(SegmentMetadataQuery query)
   {
-    return DruidMetrics.makePartialQueryTimeMetric(query);
+    return queryMetricsFactory.makeMetrics(query);
   }
 
   @Override
@@ -165,15 +168,22 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
   }
 
   @Override
-  public CacheStrategy<SegmentAnalysis, SegmentAnalysis, SegmentMetadataQuery> getCacheStrategy(SegmentMetadataQuery query)
+  public CacheStrategy<SegmentAnalysis, SegmentAnalysis, SegmentMetadataQuery> getCacheStrategy(final SegmentMetadataQuery query)
   {
     return new CacheStrategy<SegmentAnalysis, SegmentAnalysis, SegmentMetadataQuery>()
     {
       @Override
+      public boolean isCacheable(SegmentMetadataQuery query, boolean willMergeRunners)
+      {
+        return true;
+      }
+
+      @Override
       public byte[] computeCacheKey(SegmentMetadataQuery query)
       {
-        byte[] includerBytes = query.getToInclude().getCacheKey();
-        byte[] analysisTypesBytes = query.getAnalysisTypesCacheKey();
+        SegmentMetadataQuery updatedQuery = query.withFinalizedAnalysisTypes(config);
+        byte[] includerBytes = updatedQuery.getToInclude().getCacheKey();
+        byte[] analysisTypesBytes = updatedQuery.getAnalysisTypesCacheKey();
         return ByteBuffer.allocate(1 + includerBytes.length + analysisTypesBytes.length)
                          .put(SEGMENT_METADATA_CACHE_PREFIX)
                          .put(includerBytes)
@@ -221,7 +231,6 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
     if (!query.isUsingDefaultInterval()) {
       return segments;
     }
-
     if (segments.size() <= 1) {
       return segments;
     }
@@ -294,8 +303,10 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
       // Merge each aggregator individually, ignoring nulls
       for (SegmentAnalysis analysis : ImmutableList.of(arg1, arg2)) {
         if (analysis.getAggregators() != null) {
-          for (AggregatorFactory aggregator : analysis.getAggregators().values()) {
-            AggregatorFactory merged = aggregators.get(aggregator.getName());
+          for (Map.Entry<String, AggregatorFactory> entry : analysis.getAggregators().entrySet()) {
+            final String aggregatorName = entry.getKey();
+            final AggregatorFactory aggregator = entry.getValue();
+            AggregatorFactory merged = aggregators.get(aggregatorName);
             if (merged != null) {
               try {
                 merged = merged.getMergingFactory(aggregator);
@@ -306,7 +317,7 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
             } else {
               merged = aggregator;
             }
-            aggregators.put(aggregator.getName(), merged);
+            aggregators.put(aggregatorName, merged);
           }
         }
       }
@@ -329,6 +340,20 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
       }
     }
 
+    final TimestampSpec timestampSpec = TimestampSpec.mergeTimestampSpec(
+        Lists.newArrayList(
+            arg1.getTimestampSpec(),
+            arg2.getTimestampSpec()
+        )
+    );
+
+    final Granularity queryGranularity = Granularity.mergeGranularities(
+        Lists.newArrayList(
+            arg1.getQueryGranularity(),
+            arg2.getQueryGranularity()
+        )
+    );
+
     final String mergedId;
 
     if (arg1.getId() != null && arg2.getId() != null && arg1.getId().equals(arg2.getId())) {
@@ -337,13 +362,24 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
       mergedId = "merged";
     }
 
+    final Boolean rollup;
+
+    if (arg1.isRollup() != null && arg2.isRollup() != null && arg1.isRollup().equals(arg2.isRollup())) {
+      rollup = arg1.isRollup();
+    } else {
+      rollup = null;
+    }
+
     return new SegmentAnalysis(
         mergedId,
         newIntervals,
         columns,
         arg1.getSize() + arg2.getSize(),
         arg1.getNumRows() + arg2.getNumRows(),
-        aggregators.isEmpty() ? null : aggregators
+        aggregators.isEmpty() ? null : aggregators,
+        timestampSpec,
+        queryGranularity,
+        rollup
     );
   }
 
@@ -356,7 +392,15 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
         analysis.getColumns(),
         analysis.getSize(),
         analysis.getNumRows(),
-        analysis.getAggregators()
+        analysis.getAggregators(),
+        analysis.getTimestampSpec(),
+        analysis.getQueryGranularity(),
+        analysis.isRollup()
     );
+  }
+
+  public SegmentMetadataQueryConfig getConfig()
+  {
+    return this.config;
   }
 }

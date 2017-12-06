@@ -19,41 +19,46 @@
 
 package io.druid.query.aggregation;
 
+import com.fasterxml.jackson.annotation.JacksonInject;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.primitives.Doubles;
-import com.metamx.common.StringUtils;
+import io.druid.java.util.common.StringUtils;
+import io.druid.js.JavaScriptConfig;
+import io.druid.segment.BaseObjectColumnValueSelector;
 import io.druid.segment.ColumnSelectorFactory;
-import io.druid.segment.ObjectColumnSelector;
+import io.druid.segment.ColumnValueSelector;
 import org.mozilla.javascript.Context;
 import org.mozilla.javascript.ContextAction;
 import org.mozilla.javascript.ContextFactory;
 import org.mozilla.javascript.Function;
 import org.mozilla.javascript.ScriptableObject;
 
-import javax.annotation.Nullable;
 import java.lang.reflect.Array;
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 public class JavaScriptAggregatorFactory extends AggregatorFactory
 {
-  private static final byte CACHE_TYPE_ID = 0x6;
-
   private final String name;
   private final List<String> fieldNames;
   private final String fnAggregate;
   private final String fnReset;
   private final String fnCombine;
+  private final JavaScriptConfig config;
 
-
-  private final JavaScriptAggregator.ScriptAggregator compiledScript;
+  // This variable is lazily initialized to avoid unnecessary JavaScript compilation during JSON serde
+  private JavaScriptAggregator.ScriptAggregator compiledScript;
 
   @JsonCreator
   public JavaScriptAggregatorFactory(
@@ -61,7 +66,8 @@ public class JavaScriptAggregatorFactory extends AggregatorFactory
       @JsonProperty("fieldNames") final List<String> fieldNames,
       @JsonProperty("fnAggregate") final String fnAggregate,
       @JsonProperty("fnReset") final String fnReset,
-      @JsonProperty("fnCombine") final String fnCombine
+      @JsonProperty("fnCombine") final String fnCombine,
+      @JacksonInject JavaScriptConfig config
   )
   {
     Preconditions.checkNotNull(name, "Must have a valid, non-null aggregator name");
@@ -76,26 +82,15 @@ public class JavaScriptAggregatorFactory extends AggregatorFactory
     this.fnAggregate = fnAggregate;
     this.fnReset = fnReset;
     this.fnCombine = fnCombine;
-
-    this.compiledScript = compileScript(fnAggregate, fnReset, fnCombine);
+    this.config = config;
   }
 
   @Override
   public Aggregator factorize(final ColumnSelectorFactory columnFactory)
   {
+    checkAndCompileScript();
     return new JavaScriptAggregator(
-        name,
-        Lists.transform(
-            fieldNames,
-            new com.google.common.base.Function<String, ObjectColumnSelector>()
-            {
-              @Override
-              public ObjectColumnSelector apply(@Nullable String s)
-              {
-                return columnFactory.makeObjectColumnSelector(s);
-              }
-            }
-        ),
+        fieldNames.stream().map(columnFactory::makeColumnValueSelector).collect(Collectors.toList()),
         compiledScript
     );
   }
@@ -103,18 +98,9 @@ public class JavaScriptAggregatorFactory extends AggregatorFactory
   @Override
   public BufferAggregator factorizeBuffered(final ColumnSelectorFactory columnSelectorFactory)
   {
+    checkAndCompileScript();
     return new JavaScriptBufferAggregator(
-        Lists.transform(
-            fieldNames,
-            new com.google.common.base.Function<String, ObjectColumnSelector>()
-            {
-              @Override
-              public ObjectColumnSelector apply(@Nullable String s)
-              {
-                return columnSelectorFactory.makeObjectColumnSelector(s);
-              }
-            }
-        ),
+        fieldNames.stream().map(columnSelectorFactory::makeColumnValueSelector).collect(Collectors.toList()),
         compiledScript
     );
   }
@@ -128,13 +114,42 @@ public class JavaScriptAggregatorFactory extends AggregatorFactory
   @Override
   public Object combine(Object lhs, Object rhs)
   {
+    checkAndCompileScript();
     return compiledScript.combine(((Number) lhs).doubleValue(), ((Number) rhs).doubleValue());
+  }
+
+  @Override
+  public AggregateCombiner makeAggregateCombiner()
+  {
+    return new DoubleAggregateCombiner()
+    {
+      private double combined;
+
+      @Override
+      public void reset(ColumnValueSelector selector)
+      {
+        combined = selector.getDouble();
+      }
+
+      @Override
+      public void fold(ColumnValueSelector selector)
+      {
+        checkAndCompileScript();
+        combined = compiledScript.combine(combined, selector.getDouble());
+      }
+
+      @Override
+      public double getDouble()
+      {
+        return combined;
+      }
+    };
   }
 
   @Override
   public AggregatorFactory getCombiningFactory()
   {
-    return new JavaScriptAggregatorFactory(name, Lists.newArrayList(name), fnCombine, fnReset, fnCombine);
+    return new JavaScriptAggregatorFactory(name, Lists.newArrayList(name), fnCombine, fnReset, fnCombine, config);
   }
 
   @Override
@@ -152,16 +167,18 @@ public class JavaScriptAggregatorFactory extends AggregatorFactory
   @Override
   public List<AggregatorFactory> getRequiredColumns()
   {
-    return Lists.transform(
-        fieldNames,
-        new com.google.common.base.Function<String, AggregatorFactory>()
-        {
-          @Override
-          public AggregatorFactory apply(String input)
-          {
-            return new JavaScriptAggregatorFactory(input, fieldNames, fnAggregate, fnReset, fnCombine);
-          }
-        }
+    return ImmutableList.copyOf(
+        Lists.transform(
+            fieldNames,
+            new com.google.common.base.Function<String, AggregatorFactory>()
+            {
+              @Override
+              public AggregatorFactory apply(String input)
+              {
+                return new JavaScriptAggregatorFactory(input, Lists.newArrayList(input), fnCombine, fnReset, fnCombine, config);
+              }
+            }
+        )
     );
   }
 
@@ -227,7 +244,7 @@ public class JavaScriptAggregatorFactory extends AggregatorFactory
       byte[] sha1 = md.digest(StringUtils.toUtf8(fnAggregate + fnReset + fnCombine));
 
       return ByteBuffer.allocate(1 + fieldNameBytes.length + sha1.length)
-                       .put(CACHE_TYPE_ID)
+                       .put(AggregatorUtil.JS_CACHE_TYPE_ID)
                        .put(fieldNameBytes)
                        .put(sha1)
                        .array();
@@ -250,12 +267,6 @@ public class JavaScriptAggregatorFactory extends AggregatorFactory
   }
 
   @Override
-  public Object getAggregatorStartValue()
-  {
-    return compiledScript.reset();
-  }
-
-  @Override
   public String toString()
   {
     return "JavaScriptAggregatorFactory{" +
@@ -267,7 +278,27 @@ public class JavaScriptAggregatorFactory extends AggregatorFactory
            '}';
   }
 
-  public static JavaScriptAggregator.ScriptAggregator compileScript(
+  /**
+   * This class can be used by multiple threads, so this function should be thread-safe to avoid extra
+   * script compilation.
+   */
+  private void checkAndCompileScript()
+  {
+    if (compiledScript == null) {
+      // JavaScript configuration should be checked when it's actually used because someone might still want Druid
+      // nodes to be able to deserialize JavaScript-based objects even though JavaScript is disabled.
+      Preconditions.checkState(config.isEnabled(), "JavaScript is disabled");
+
+      synchronized (config) {
+        if (compiledScript == null) {
+          compiledScript = compileScript(fnAggregate, fnReset, fnCombine);
+        }
+      }
+    }
+  }
+
+  @VisibleForTesting
+  static JavaScriptAggregator.ScriptAggregator compileScript(
       final String aggregate,
       final String reset,
       final String combine
@@ -275,7 +306,7 @@ public class JavaScriptAggregatorFactory extends AggregatorFactory
   {
     final ContextFactory contextFactory = ContextFactory.getGlobal();
     Context context = contextFactory.enterContext();
-    context.setOptimizationLevel(9);
+    context.setOptimizationLevel(JavaScriptConfig.DEFAULT_OPTIMIZATION_LEVEL);
 
     final ScriptableObject scope = context.initStandardObjects();
 
@@ -287,7 +318,7 @@ public class JavaScriptAggregatorFactory extends AggregatorFactory
     return new JavaScriptAggregator.ScriptAggregator()
     {
       @Override
-      public double aggregate(final double current, final ObjectColumnSelector[] selectorList)
+      public double aggregate(final double current, final BaseObjectColumnValueSelector[] selectorList)
       {
         Context cx = Context.getCurrentContext();
         if (cx == null) {
@@ -301,10 +332,10 @@ public class JavaScriptAggregatorFactory extends AggregatorFactory
         final Object[] args = new Object[size + 1];
 
         args[0] = current;
-        for (int i = 0 ; i < size ; i++) {
-          final ObjectColumnSelector selector = selectorList[i];
+        for (int i = 0; i < size; i++) {
+          final BaseObjectColumnValueSelector selector = selectorList[i];
           if (selector != null) {
-            final Object arg = selector.get();
+            final Object arg = selector.getObject();
             if (arg != null && arg.getClass().isArray()) {
               // Context.javaToJS on an array sort of works, although it returns false for Array.isArray(...) and
               // may have other issues too. Let's just copy the array and wrap that.
@@ -368,31 +399,23 @@ public class JavaScriptAggregatorFactory extends AggregatorFactory
   @Override
   public boolean equals(Object o)
   {
-    if (this == o) return true;
-    if (o == null || getClass() != o.getClass()) return false;
-
-    JavaScriptAggregatorFactory that = (JavaScriptAggregatorFactory) o;
-
-    if (compiledScript != null ? !compiledScript.equals(that.compiledScript) : that.compiledScript != null)
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
       return false;
-    if (fieldNames != null ? !fieldNames.equals(that.fieldNames) : that.fieldNames != null) return false;
-    if (fnAggregate != null ? !fnAggregate.equals(that.fnAggregate) : that.fnAggregate != null) return false;
-    if (fnCombine != null ? !fnCombine.equals(that.fnCombine) : that.fnCombine != null) return false;
-    if (fnReset != null ? !fnReset.equals(that.fnReset) : that.fnReset != null) return false;
-    if (name != null ? !name.equals(that.name) : that.name != null) return false;
-
-    return true;
+    }
+    JavaScriptAggregatorFactory that = (JavaScriptAggregatorFactory) o;
+    return Objects.equals(name, that.name) &&
+           Objects.equals(fieldNames, that.fieldNames) &&
+           Objects.equals(fnAggregate, that.fnAggregate) &&
+           Objects.equals(fnReset, that.fnReset) &&
+           Objects.equals(fnCombine, that.fnCombine);
   }
 
   @Override
   public int hashCode()
   {
-    int result = name != null ? name.hashCode() : 0;
-    result = 31 * result + (fieldNames != null ? fieldNames.hashCode() : 0);
-    result = 31 * result + (fnAggregate != null ? fnAggregate.hashCode() : 0);
-    result = 31 * result + (fnReset != null ? fnReset.hashCode() : 0);
-    result = 31 * result + (fnCombine != null ? fnCombine.hashCode() : 0);
-    result = 31 * result + (compiledScript != null ? compiledScript.hashCode() : 0);
-    return result;
+    return Objects.hash(name, fieldNames, fnAggregate, fnReset, fnCombine);
   }
 }

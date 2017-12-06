@@ -29,7 +29,7 @@ import com.google.inject.Injector;
 import com.google.inject.Module;
 import com.google.inject.TypeLiteral;
 import com.google.inject.name.Names;
-import com.metamx.common.logger.Logger;
+
 import io.airlift.airline.Arguments;
 import io.airlift.airline.Command;
 import io.druid.guice.LazySingleton;
@@ -43,6 +43,7 @@ import io.druid.indexer.MetadataStorageUpdaterJobHandler;
 import io.druid.indexer.path.MetadataStoreBasedUsedSegmentLister;
 import io.druid.indexer.updater.MetadataStorageUpdaterJobSpec;
 import io.druid.indexing.overlord.IndexerMetadataStorageCoordinator;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.metadata.IndexerSQLMetadataStorageCoordinator;
 import io.druid.metadata.MetadataStorageConnectorConfig;
 import io.druid.metadata.MetadataStorageTablesConfig;
@@ -84,6 +85,7 @@ public class CliInternalHadoopIndexer extends GuiceRunnable
           {
             binder.bindConstant().annotatedWith(Names.named("serviceName")).to("druid/internal-hadoop-indexer");
             binder.bindConstant().annotatedWith(Names.named("servicePort")).to(0);
+            binder.bindConstant().annotatedWith(Names.named("tlsServicePort")).to(-1);
 
             // bind metadata storage config based on HadoopIOConfig
             MetadataStorageUpdaterJobSpec metadataSpec = getHadoopDruidIndexerConfig().getSchema()
@@ -137,7 +139,7 @@ public class CliInternalHadoopIndexer extends GuiceRunnable
 
   public HadoopDruidIndexerConfig getHadoopDruidIndexerConfig()
   {
-    if(config == null) {
+    if (config == null) {
       try {
         if (argumentSpec.startsWith("{")) {
           config = HadoopDruidIndexerConfig.fromString(argumentSpec);
@@ -152,7 +154,8 @@ public class CliInternalHadoopIndexer extends GuiceRunnable
               // File URI.
               localConfigFile = new File(argumentSpecUri.getPath());
             }
-          } catch (URISyntaxException e) {
+          }
+          catch (URISyntaxException e) {
             // Not a URI, assume it's a local file.
             localConfigFile = new File(argumentSpec);
           }

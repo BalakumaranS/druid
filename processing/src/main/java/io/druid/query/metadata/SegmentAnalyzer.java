@@ -25,12 +25,13 @@ import com.google.common.base.Strings;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
+import com.google.common.primitives.Doubles;
 import com.google.common.primitives.Longs;
-import com.metamx.common.StringUtils;
-import com.metamx.common.guava.Accumulator;
-import com.metamx.common.guava.Sequence;
-import com.metamx.common.logger.Logger;
-import io.druid.granularity.QueryGranularity;
+import io.druid.java.util.common.StringUtils;
+import io.druid.java.util.common.granularity.Granularities;
+import io.druid.java.util.common.guava.Accumulator;
+import io.druid.java.util.common.guava.Sequence;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.query.dimension.DefaultDimensionSpec;
 import io.druid.query.metadata.metadata.ColumnAnalysis;
 import io.druid.query.metadata.metadata.SegmentMetadataQuery;
@@ -39,6 +40,7 @@ import io.druid.segment.DimensionSelector;
 import io.druid.segment.QueryableIndex;
 import io.druid.segment.Segment;
 import io.druid.segment.StorageAdapter;
+import io.druid.segment.VirtualColumns;
 import io.druid.segment.column.BitmapIndex;
 import io.druid.segment.column.Column;
 import io.druid.segment.column.ColumnCapabilities;
@@ -48,6 +50,7 @@ import io.druid.segment.column.ValueType;
 import io.druid.segment.data.IndexedInts;
 import io.druid.segment.serde.ComplexMetricSerde;
 import io.druid.segment.serde.ComplexMetrics;
+import org.joda.time.DateTime;
 import org.joda.time.Interval;
 
 import javax.annotation.Nullable;
@@ -76,7 +79,7 @@ public class SegmentAnalyzer
     this.analysisTypes = analysisTypes;
   }
 
-  public int numRows(Segment segment)
+  public long numRows(Segment segment)
   {
     return Preconditions.checkNotNull(segment, "segment").asStorageAdapter().getNumRows();
   }
@@ -112,6 +115,9 @@ public class SegmentAnalyzer
         case FLOAT:
           analysis = analyzeNumericColumn(capabilities, length, NUM_BYTES_IN_TEXT_FLOAT);
           break;
+        case DOUBLE:
+          analysis = analyzeNumericColumn(capabilities, length, Doubles.BYTES);
+          break;
         case STRING:
           if (index != null) {
             analysis = analyzeStringColumn(capabilities, column);
@@ -124,7 +130,7 @@ public class SegmentAnalyzer
           break;
         default:
           log.warn("Unknown column type[%s].", type);
-          analysis = ColumnAnalysis.error(String.format("unknown_type_%s", type));
+          analysis = ColumnAnalysis.error(StringUtils.format("unknown_type_%s", type));
       }
 
       columns.put(columnName, analysis);
@@ -206,7 +212,7 @@ public class SegmentAnalyzer
       for (int i = 0; i < cardinality; ++i) {
         String value = bitmapIndex.getValue(i);
         if (value != null) {
-          size += StringUtils.toUtf8(value).length * bitmapIndex.getBitmap(value).size();
+          size += StringUtils.estimatedBinaryLengthAsUTF8(value) * bitmapIndex.getBitmap(bitmapIndex.getIndex(value)).size();
         }
       }
     }
@@ -244,11 +250,18 @@ public class SegmentAnalyzer
     }
 
     if (analyzingSize()) {
-      final long start = storageAdapter.getMinTime().getMillis();
-      final long end = storageAdapter.getMaxTime().getMillis();
+      final DateTime start = storageAdapter.getMinTime();
+      final DateTime end = storageAdapter.getMaxTime();
 
       final Sequence<Cursor> cursors =
-          storageAdapter.makeCursors(null, new Interval(start, end), QueryGranularity.ALL, false);
+          storageAdapter.makeCursors(
+              null,
+              new Interval(start, end),
+              VirtualColumns.EMPTY,
+              Granularities.ALL,
+              false,
+              null
+          );
 
       size = cursors.accumulate(
           0L,
@@ -257,12 +270,9 @@ public class SegmentAnalyzer
             @Override
             public Long accumulate(Long accumulated, Cursor cursor)
             {
-              DimensionSelector selector = cursor.makeDimensionSelector(
-                  new DefaultDimensionSpec(
-                      columnName,
-                      columnName
-                  )
-              );
+              DimensionSelector selector = cursor
+                  .getColumnSelectorFactory()
+                  .makeDimensionSelector(new DefaultDimensionSpec(columnName, columnName));
               if (selector == null) {
                 return accumulated;
               }
@@ -272,7 +282,7 @@ public class SegmentAnalyzer
                 for (int i = 0; i < vals.size(); ++i) {
                   final String dimVal = selector.lookupName(vals.get(i));
                   if (dimVal != null && !dimVal.isEmpty()) {
-                    current += StringUtils.toUtf8(dimVal).length;
+                    current += StringUtils.estimatedBinaryLengthAsUTF8(dimVal);
                   }
                 }
                 cursor.advance();
@@ -306,35 +316,36 @@ public class SegmentAnalyzer
       final String typeName
   )
   {
-    final ComplexColumn complexColumn = column != null ? column.getComplexColumn() : null;
-    final boolean hasMultipleValues = capabilities != null && capabilities.hasMultipleValues();
-    long size = 0;
+    try (final ComplexColumn complexColumn = column != null ? column.getComplexColumn() : null) {
+      final boolean hasMultipleValues = capabilities != null && capabilities.hasMultipleValues();
+      long size = 0;
 
-    if (analyzingSize() && complexColumn != null) {
-      final ComplexMetricSerde serde = ComplexMetrics.getSerdeForType(typeName);
-      if (serde == null) {
-        return ColumnAnalysis.error(String.format("unknown_complex_%s", typeName));
+      if (analyzingSize() && complexColumn != null) {
+        final ComplexMetricSerde serde = ComplexMetrics.getSerdeForType(typeName);
+        if (serde == null) {
+          return ColumnAnalysis.error(StringUtils.format("unknown_complex_%s", typeName));
+        }
+
+        final Function<Object, Long> inputSizeFn = serde.inputSizeFn();
+        if (inputSizeFn == null) {
+          return new ColumnAnalysis(typeName, hasMultipleValues, 0, null, null, null, null);
+        }
+
+        final int length = column.getLength();
+        for (int i = 0; i < length; ++i) {
+          size += inputSizeFn.apply(complexColumn.getRowValue(i));
+        }
       }
 
-      final Function<Object, Long> inputSizeFn = serde.inputSizeFn();
-      if (inputSizeFn == null) {
-        return new ColumnAnalysis(typeName, hasMultipleValues, 0, null, null, null, null);
-      }
-
-      final int length = column.getLength();
-      for (int i = 0; i < length; ++i) {
-        size += inputSizeFn.apply(complexColumn.getRowValue(i));
-      }
+      return new ColumnAnalysis(
+          typeName,
+          hasMultipleValues,
+          size,
+          null,
+          null,
+          null,
+          null
+      );
     }
-
-    return new ColumnAnalysis(
-        typeName,
-        hasMultipleValues,
-        size,
-        null,
-        null,
-        null,
-        null
-    );
   }
 }

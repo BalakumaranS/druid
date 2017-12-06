@@ -40,18 +40,23 @@ import static org.junit.Assert.assertTrue;
 
 public class HavingSpecTest
 {
-  private static final Row ROW = new MapBasedInputRow(0, new ArrayList<String>(), ImmutableMap.of("metric", (Object)Float.valueOf(10)));
+  private static final Row ROW = new MapBasedInputRow(
+      0,
+      new ArrayList<>(),
+      ImmutableMap.of("metric", Float.valueOf(10))
+  );
 
   @Test
-  public void testHavingClauseSerde() throws Exception {
-    List<HavingSpec> havings = Arrays.asList(
-      new GreaterThanHavingSpec("agg", Double.valueOf(1.3)),
-      new OrHavingSpec(
-        Arrays.asList(
-          new LessThanHavingSpec("lessAgg", Long.valueOf(1L)),
-          new NotHavingSpec(new EqualToHavingSpec("equalAgg", Double.valueOf(2)))
+  public void testHavingClauseSerde() throws Exception
+  {
+    List<HavingSpec> havings = Arrays.<HavingSpec>asList(
+        new GreaterThanHavingSpec("agg", Double.valueOf(1.3)),
+        new OrHavingSpec(
+            Arrays.<HavingSpec>asList(
+                new LessThanHavingSpec("lessAgg", Long.valueOf(1L)),
+                new NotHavingSpec(new EqualToHavingSpec("equalAgg", Double.valueOf(2)))
+            )
         )
-      )
     );
 
     HavingSpec andHavingSpec = new AndHavingSpec(havings);
@@ -84,7 +89,7 @@ public class HavingSpecTest
     );
 
     ObjectMapper mapper = new DefaultObjectMapper();
-    assertEquals(andHavingSpec,  mapper.convertValue(payloadMap, AndHavingSpec.class));
+    assertEquals(andHavingSpec, mapper.convertValue(payloadMap, AndHavingSpec.class));
   }
 
   @Test(expected = IllegalArgumentException.class)
@@ -96,12 +101,14 @@ public class HavingSpecTest
         "value", 1.3
     );
     ObjectMapper mapper = new DefaultObjectMapper();
-    HavingSpec spec = mapper.convertValue (greaterMap, HavingSpec.class);
+    @SuppressWarnings("unused") // expected exception
+    HavingSpec spec = mapper.convertValue(greaterMap, HavingSpec.class);
 
   }
 
   @Test
-  public void testGreaterThanHavingSpec() {
+  public void testGreaterThanHavingSpec()
+  {
     GreaterThanHavingSpec spec = new GreaterThanHavingSpec("metric", Long.valueOf(Long.MAX_VALUE - 10));
     assertFalse(spec.eval(getTestRow(Long.valueOf(Long.MAX_VALUE - 10))));
     assertFalse(spec.eval(getTestRow(Long.valueOf(Long.MAX_VALUE - 15))));
@@ -118,7 +125,8 @@ public class HavingSpecTest
   }
 
   @Test
-  public void testLessThanHavingSpec() {
+  public void testLessThanHavingSpec()
+  {
     LessThanHavingSpec spec = new LessThanHavingSpec("metric", Long.valueOf(Long.MAX_VALUE - 10));
     assertFalse(spec.eval(getTestRow(Long.valueOf(Long.MAX_VALUE - 10))));
     assertTrue(spec.eval(getTestRow(Long.valueOf(Long.MAX_VALUE - 15))));
@@ -140,7 +148,8 @@ public class HavingSpecTest
   }
 
   @Test
-  public void testEqualHavingSpec() {
+  public void testEqualHavingSpec()
+  {
     EqualToHavingSpec spec = new EqualToHavingSpec("metric", Long.valueOf(Long.MAX_VALUE - 10));
     assertTrue(spec.eval(getTestRow(Long.valueOf(Long.MAX_VALUE - 10))));
     assertFalse(spec.eval(getTestRow(Long.valueOf(Long.MAX_VALUE - 5))));
@@ -152,10 +161,12 @@ public class HavingSpecTest
     assertFalse(spec.eval(getTestRow(Long.MAX_VALUE)));
   }
 
-  private static class CountingHavingSpec implements HavingSpec {
+  private static class CountingHavingSpec extends BaseHavingSpec
+  {
 
     private final AtomicInteger counter;
     private final boolean value;
+
     private CountingHavingSpec(AtomicInteger counter, boolean value)
     {
       this.counter = counter;
@@ -168,22 +179,17 @@ public class HavingSpecTest
       counter.incrementAndGet();
       return value;
     }
-
-    @Override
-    public byte[] getCacheKey()
-    {
-      return new byte[0];
-    }
   }
 
   @Test
-  public void testAndHavingSpecShouldSupportShortcutEvaluation () {
+  public void testAndHavingSpecShouldSupportShortcutEvaluation()
+  {
     AtomicInteger counter = new AtomicInteger(0);
     AndHavingSpec spec = new AndHavingSpec(ImmutableList.of(
-      (HavingSpec)new CountingHavingSpec(counter, true),
-      new CountingHavingSpec(counter, false),
-      new CountingHavingSpec(counter, true),
-      new CountingHavingSpec(counter, false)
+        (HavingSpec) new CountingHavingSpec(counter, true),
+        new CountingHavingSpec(counter, false),
+        new CountingHavingSpec(counter, true),
+        new CountingHavingSpec(counter, false)
     ));
 
     spec.eval(ROW);
@@ -192,13 +198,14 @@ public class HavingSpecTest
   }
 
   @Test
-  public void testAndHavingSpec () {
+  public void testAndHavingSpec()
+  {
     AtomicInteger counter = new AtomicInteger(0);
     AndHavingSpec spec = new AndHavingSpec(ImmutableList.of(
-      (HavingSpec)new CountingHavingSpec(counter, true),
-      new CountingHavingSpec(counter, true),
-      new CountingHavingSpec(counter, true),
-      new CountingHavingSpec(counter, true)
+        (HavingSpec) new CountingHavingSpec(counter, true),
+        new CountingHavingSpec(counter, true),
+        new CountingHavingSpec(counter, true),
+        new CountingHavingSpec(counter, true)
     ));
 
     spec.eval(ROW);
@@ -207,10 +214,10 @@ public class HavingSpecTest
 
     counter.set(0);
     spec = new AndHavingSpec(ImmutableList.of(
-      (HavingSpec)new CountingHavingSpec(counter, false),
-      new CountingHavingSpec(counter, true),
-      new CountingHavingSpec(counter, true),
-      new CountingHavingSpec(counter, true)
+        (HavingSpec) new CountingHavingSpec(counter, false),
+        new CountingHavingSpec(counter, true),
+        new CountingHavingSpec(counter, true),
+        new CountingHavingSpec(counter, true)
     ));
 
     spec.eval(ROW);
@@ -219,13 +226,14 @@ public class HavingSpecTest
   }
 
   @Test
-  public void testOrHavingSpecSupportsShortcutEvaluation() {
+  public void testOrHavingSpecSupportsShortcutEvaluation()
+  {
     AtomicInteger counter = new AtomicInteger(0);
     OrHavingSpec spec = new OrHavingSpec(ImmutableList.of(
-      (HavingSpec)new CountingHavingSpec(counter, true),
-      new CountingHavingSpec(counter, true),
-      new CountingHavingSpec(counter, true),
-      new CountingHavingSpec(counter, false)
+        (HavingSpec) new CountingHavingSpec(counter, true),
+        new CountingHavingSpec(counter, true),
+        new CountingHavingSpec(counter, true),
+        new CountingHavingSpec(counter, false)
     ));
 
     spec.eval(ROW);
@@ -234,13 +242,14 @@ public class HavingSpecTest
   }
 
   @Test
-  public void testOrHavingSpec () {
+  public void testOrHavingSpec()
+  {
     AtomicInteger counter = new AtomicInteger(0);
     OrHavingSpec spec = new OrHavingSpec(ImmutableList.of(
-      (HavingSpec)new CountingHavingSpec(counter, false),
-      new CountingHavingSpec(counter, false),
-      new CountingHavingSpec(counter, false),
-      new CountingHavingSpec(counter, false)
+        (HavingSpec) new CountingHavingSpec(counter, false),
+        new CountingHavingSpec(counter, false),
+        new CountingHavingSpec(counter, false),
+        new CountingHavingSpec(counter, false)
     ));
 
     spec.eval(ROW);
@@ -249,10 +258,10 @@ public class HavingSpecTest
 
     counter.set(0);
     spec = new OrHavingSpec(ImmutableList.of(
-      (HavingSpec)new CountingHavingSpec(counter, false),
-      new CountingHavingSpec(counter, false),
-      new CountingHavingSpec(counter, false),
-      new CountingHavingSpec(counter, true)
+        (HavingSpec) new CountingHavingSpec(counter, false),
+        new CountingHavingSpec(counter, false),
+        new CountingHavingSpec(counter, false),
+        new CountingHavingSpec(counter, true)
     ));
 
     spec.eval(ROW);
@@ -261,7 +270,8 @@ public class HavingSpecTest
   }
 
   @Test
-  public void testNotHavingSepc() {
+  public void testNotHavingSepc()
+  {
     NotHavingSpec spec = new NotHavingSpec(HavingSpec.NEVER);
     assertTrue(spec.eval(ROW));
 

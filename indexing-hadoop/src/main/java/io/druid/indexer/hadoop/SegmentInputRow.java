@@ -33,16 +33,19 @@ import java.util.List;
  */
 public class SegmentInputRow implements InputRow
 {
-  private final InputRow delegate;
+  private final Row delegate;
+  private final List<String> dimensions;
 
-  public SegmentInputRow(InputRow delegate){
+  public SegmentInputRow(Row delegate, List<String> dimensions)
+  {
     this.delegate = delegate;
+    this.dimensions = dimensions;
   }
 
   @Override
   public List<String> getDimensions()
   {
-    return delegate.getDimensions();
+    return dimensions;
   }
 
   @Override
@@ -70,15 +73,9 @@ public class SegmentInputRow implements InputRow
   }
 
   @Override
-  public float getFloatMetric(String metric)
+  public Number getMetric(String metric)
   {
-    return delegate.getFloatMetric(metric);
-  }
-
-  @Override
-  public long getLongMetric(String metric)
-  {
-    return delegate.getLongMetric(metric);
+    return delegate.getMetric(metric);
   }
 
   @Override

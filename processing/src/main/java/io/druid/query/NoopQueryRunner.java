@@ -19,8 +19,8 @@
 
 package io.druid.query;
 
-import com.metamx.common.guava.Sequence;
-import com.metamx.common.guava.Sequences;
+import io.druid.java.util.common.guava.Sequence;
+import io.druid.java.util.common.guava.Sequences;
 
 import java.util.Map;
 
@@ -29,7 +29,7 @@ import java.util.Map;
 public class NoopQueryRunner<T> implements QueryRunner<T>
 {
   @Override
-  public Sequence<T> run(Query<T> query, Map<String, Object> responseContext)
+  public Sequence<T> run(QueryPlus<T> queryPlus, Map<String, Object> responseContext)
   {
     return Sequences.empty();
   }

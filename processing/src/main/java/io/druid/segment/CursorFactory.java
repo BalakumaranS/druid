@@ -19,14 +19,24 @@
 
 package io.druid.segment;
 
-import com.metamx.common.guava.Sequence;
-import io.druid.granularity.QueryGranularity;
+import io.druid.java.util.common.granularity.Granularity;
+import io.druid.java.util.common.guava.Sequence;
+import io.druid.query.QueryMetrics;
 import io.druid.query.filter.Filter;
 import org.joda.time.Interval;
+
+import javax.annotation.Nullable;
 
 /**
  */
 public interface CursorFactory
 {
-  public Sequence<Cursor> makeCursors(Filter filter, Interval interval, QueryGranularity gran, boolean descending);
+  Sequence<Cursor> makeCursors(
+      Filter filter,
+      Interval interval,
+      VirtualColumns virtualColumns,
+      Granularity gran,
+      boolean descending,
+      @Nullable QueryMetrics<?> queryMetrics
+  );
 }

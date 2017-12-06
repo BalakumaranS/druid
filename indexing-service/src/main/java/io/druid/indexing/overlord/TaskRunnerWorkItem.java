@@ -21,28 +21,30 @@ package io.druid.indexing.overlord;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.collect.ComparisonChain;
 import com.google.common.util.concurrent.ListenableFuture;
+import io.druid.indexing.common.TaskLocation;
 import io.druid.indexing.common.TaskStatus;
+import io.druid.java.util.common.DateTimes;
 import org.joda.time.DateTime;
-import org.joda.time.DateTimeComparator;
 
 /**
  * A holder for a task and different components associated with the task
  */
-public class TaskRunnerWorkItem implements Comparable<TaskRunnerWorkItem>
+public abstract class TaskRunnerWorkItem
 {
   private final String taskId;
   private final ListenableFuture<TaskStatus> result;
   private final DateTime createdTime;
   private final DateTime queueInsertionTime;
 
-  public TaskRunnerWorkItem(
-      String taskId,
-      ListenableFuture<TaskStatus> result
-  )
+  public TaskRunnerWorkItem(String taskId, ListenableFuture<TaskStatus> result)
   {
-    this(taskId, result, new DateTime(), new DateTime());
+    this(taskId, result, DateTimes.nowUtc());
+  }
+
+  private TaskRunnerWorkItem(String taskId, ListenableFuture<TaskStatus> result, DateTime createdTime)
+  {
+    this(taskId, result, createdTime, createdTime);
   }
 
   public TaskRunnerWorkItem(
@@ -82,19 +84,7 @@ public class TaskRunnerWorkItem implements Comparable<TaskRunnerWorkItem>
     return queueInsertionTime;
   }
 
-  public TaskRunnerWorkItem withQueueInsertionTime(DateTime time)
-  {
-    return new TaskRunnerWorkItem(taskId, result, createdTime, time);
-  }
-
-  @Override
-  public int compareTo(TaskRunnerWorkItem taskRunnerWorkItem)
-  {
-    return ComparisonChain.start()
-                          .compare(createdTime, taskRunnerWorkItem.getCreatedTime(), DateTimeComparator.getInstance())
-                          .compare(taskId, taskRunnerWorkItem.getTaskId())
-                          .result();
-  }
+  public abstract TaskLocation getLocation();
 
   @Override
   public String toString()
@@ -104,6 +94,7 @@ public class TaskRunnerWorkItem implements Comparable<TaskRunnerWorkItem>
            ", result=" + result +
            ", createdTime=" + createdTime +
            ", queueInsertionTime=" + queueInsertionTime +
+           ", location=" + getLocation() +
            '}';
   }
 }

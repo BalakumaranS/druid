@@ -19,19 +19,24 @@
 
 package io.druid.segment;
 
+import io.druid.guice.annotations.PublicApi;
 import io.druid.segment.column.ColumnCapabilities;
 import io.druid.segment.data.Indexed;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
 
+import javax.annotation.Nullable;
+
 /**
  */
+@PublicApi
 public interface StorageAdapter extends CursorFactory
 {
-  public String getSegmentIdentifier();
-  public Interval getInterval();
-  public Indexed<String> getAvailableDimensions();
-  public Iterable<String> getAvailableMetrics();
+  @PublicApi
+  String getSegmentIdentifier();
+  Interval getInterval();
+  Indexed<String> getAvailableDimensions();
+  Iterable<String> getAvailableMetrics();
 
   /**
    * Returns the number of distinct values for the given dimension column
@@ -41,21 +46,34 @@ public interface StorageAdapter extends CursorFactory
    * @param column
    * @return
    */
-  public int getDimensionCardinality(String column);
-  public DateTime getMinTime();
-  public DateTime getMaxTime();
-  public Comparable getMinValue(String column);
-  public Comparable getMaxValue(String column);
-  public Capabilities getCapabilities();
-  public ColumnCapabilities getColumnCapabilities(String column);
+  int getDimensionCardinality(String column);
+  DateTime getMinTime();
+  DateTime getMaxTime();
+  @Nullable
+  Comparable getMinValue(String column);
+  @Nullable
+  Comparable getMaxValue(String column);
+  Capabilities getCapabilities();
+
+  /**
+   * Returns capabilities of a particular column, if known. May be null if the column doesn't exist, or if
+   * the column does exist but the capabilities are unknown. The latter is possible with dynamically discovered
+   * columns.
+   *
+   * @param column column name
+   *
+   * @return capabilities, or null
+   */
+  @Nullable
+  ColumnCapabilities getColumnCapabilities(String column);
 
   /**
    * Like {@link ColumnCapabilities#getType()}, but may return a more descriptive string for complex columns.
    * @param column column name
    * @return type name
    */
-  public String getColumnTypeName(String column);
-  public int getNumRows();
-  public DateTime getMaxIngestedEventTime();
-  public Metadata getMetadata();
+  String getColumnTypeName(String column);
+  int getNumRows();
+  DateTime getMaxIngestedEventTime();
+  Metadata getMetadata();
 }

@@ -59,7 +59,7 @@ public class FireDepartment extends IngestionSpec<RealtimeIOConfig, RealtimeTuni
 
     this.dataSchema = dataSchema;
     this.ioConfig = ioConfig;
-    this.tuningConfig = tuningConfig == null ? RealtimeTuningConfig.makeDefaultTuningConfig() : tuningConfig;
+    this.tuningConfig = tuningConfig == null ? RealtimeTuningConfig.makeDefaultTuningConfig(null) : tuningConfig;
 
   }
 
@@ -101,7 +101,7 @@ public class FireDepartment extends IngestionSpec<RealtimeIOConfig, RealtimeTuni
 
   public Firehose connect() throws IOException
   {
-    return ioConfig.getFirehoseFactory().connect(dataSchema.getParser());
+    return ioConfig.getFirehoseFactory().connect(dataSchema.getParser(), null);
   }
 
   public FirehoseV2 connect(Object metaData) throws IOException

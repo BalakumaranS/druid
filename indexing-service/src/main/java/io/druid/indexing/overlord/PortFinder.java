@@ -20,8 +20,9 @@
 package io.druid.indexing.overlord;
 
 import com.google.common.collect.Sets;
-import com.metamx.common.ISE;
-import com.metamx.common.Pair;
+
+import io.druid.java.util.common.ISE;
+import io.druid.java.util.common.Pair;
 
 import java.io.IOException;
 import java.net.BindException;
@@ -40,31 +41,16 @@ public class PortFinder
 
   private static boolean canBind(int portNum)
   {
-    ServerSocket ss = null;
-    boolean isFree = false;
     try {
-      ss = new ServerSocket(portNum);
-      isFree = true;
+      new ServerSocket(portNum).close();
+      return true;
     }
     catch (BindException be) {
-      isFree = false; // port in use,
+      return false;
     }
     catch (IOException e) {
       throw new RuntimeException(e);
     }
-    finally {
-      if (ss != null) {
-        while (!ss.isClosed()) {
-          try {
-            ss.close();
-          }
-          catch (IOException e) {
-            // ignore
-          }
-        }
-      }
-    }
-    return isFree;
   }
 
   public synchronized int findUnusedPort()
@@ -95,7 +81,8 @@ public class PortFinder
 
   private int chooseNext(int start)
   {
-    for (int i = start; i < Integer.MAX_VALUE; i++) {
+    // up to unsigned short max (65535)
+    for (int i = start; i <= 0xFFFF; i++) {
       if (!usedPorts.contains(i)) {
         return i;
       }

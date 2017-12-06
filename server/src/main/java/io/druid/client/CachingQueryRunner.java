@@ -29,15 +29,16 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
-import com.metamx.common.guava.BaseSequence;
-import com.metamx.common.guava.Sequence;
-import com.metamx.common.guava.Sequences;
-import com.metamx.common.logger.Logger;
+import com.google.common.util.concurrent.SettableFuture;
 import io.druid.client.cache.Cache;
 import io.druid.client.cache.CacheConfig;
-import io.druid.query.BaseQuery;
+import io.druid.java.util.common.guava.BaseSequence;
+import io.druid.java.util.common.guava.Sequence;
+import io.druid.java.util.common.guava.Sequences;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.query.CacheStrategy;
 import io.druid.query.Query;
+import io.druid.query.QueryPlus;
 import io.druid.query.QueryRunner;
 import io.druid.query.QueryToolChest;
 import io.druid.query.SegmentDescriptor;
@@ -46,7 +47,6 @@ import java.io.IOException;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 
@@ -84,19 +84,12 @@ public class CachingQueryRunner<T> implements QueryRunner<T>
   }
 
   @Override
-  public Sequence<T> run(Query<T> query, Map<String, Object> responseContext)
+  public Sequence<T> run(QueryPlus<T> queryPlus, Map<String, Object> responseContext)
   {
+    Query<T> query = queryPlus.getQuery();
     final CacheStrategy strategy = toolChest.getCacheStrategy(query);
-
-    final boolean populateCache = BaseQuery.getContextPopulateCache(query, true)
-                                  && strategy != null
-                                  && cacheConfig.isPopulateCache()
-                                  && cacheConfig.isQueryCacheable(query);
-
-    final boolean useCache = BaseQuery.getContextUseCache(query, true)
-                             && strategy != null
-                             && cacheConfig.isUseCache()
-                             && cacheConfig.isQueryCacheable(query);
+    final boolean populateCache = CacheUtil.populateCacheOnDataNodes(query, strategy, cacheConfig);
+    final boolean useCache = CacheUtil.useCacheOnDataNodes(query, strategy, cacheConfig);
 
     final Cache.NamedKey key;
     if (strategy != null && (useCache || populateCache)) {
@@ -151,27 +144,32 @@ public class CachingQueryRunner<T> implements QueryRunner<T>
     final Collection<ListenableFuture<?>> cacheFutures = Collections.synchronizedList(Lists.<ListenableFuture<?>>newLinkedList());
     if (populateCache) {
       final Function cacheFn = strategy.prepareForCache();
-      final List<Object> cacheResults = Lists.newLinkedList();
 
       return Sequences.withEffect(
           Sequences.map(
-              base.run(query, responseContext),
+              base.run(queryPlus, responseContext),
               new Function<T, T>()
               {
                 @Override
                 public T apply(final T input)
                 {
-                  cacheFutures.add(
-                      backgroundExecutorService.submit(
-                          new Runnable()
-                          {
-                            @Override
-                            public void run()
-                            {
-                              cacheResults.add(cacheFn.apply(input));
-                            }
+                  final SettableFuture<Object> future = SettableFuture.create();
+                  cacheFutures.add(future);
+                  backgroundExecutorService.submit(
+                      new Runnable()
+                      {
+                        @Override
+                        public void run()
+                        {
+                          try {
+                            future.set(cacheFn.apply(input));
                           }
-                      )
+                          catch (Exception e) {
+                            // if there is exception, should setException to quit the caching processing
+                            future.setException(e);
+                          }
+                        }
+                      }
                   );
                   return input;
                 }
@@ -183,8 +181,7 @@ public class CachingQueryRunner<T> implements QueryRunner<T>
             public void run()
             {
               try {
-                Futures.allAsList(cacheFutures).get();
-                CacheUtil.populate(cache, mapper, key, cacheResults);
+                CacheUtil.populate(cache, mapper, key, Futures.allAsList(cacheFutures).get());
               }
               catch (Exception e) {
                 log.error(e, "Error while getting future for cache task");
@@ -195,7 +192,7 @@ public class CachingQueryRunner<T> implements QueryRunner<T>
           backgroundExecutorService
       );
     } else {
-      return base.run(query, responseContext);
+      return base.run(queryPlus, responseContext);
     }
   }
 

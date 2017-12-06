@@ -19,11 +19,15 @@
 
 package io.druid.timeline;
 
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.google.common.collect.Ordering;
 import com.google.common.collect.Sets;
-import com.metamx.common.guava.Comparators;
-import com.metamx.common.logger.Logger;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.UOE;
+import io.druid.java.util.common.guava.Comparators;
 import io.druid.timeline.partition.ImmutablePartitionHolder;
 import io.druid.timeline.partition.PartitionChunk;
 import io.druid.timeline.partition.PartitionHolder;
@@ -35,6 +39,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -59,8 +64,6 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  */
 public class VersionedIntervalTimeline<VersionType, ObjectType> implements TimelineLookup<VersionType, ObjectType>
 {
-  private static final Logger log = new Logger(VersionedIntervalTimeline.class);
-
   private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock(true);
 
   final NavigableMap<Interval, TimelineEntry> completePartitionsTimeline = new TreeMap<Interval, TimelineEntry>(
@@ -78,6 +81,21 @@ public class VersionedIntervalTimeline<VersionType, ObjectType> implements Timel
   )
   {
     this.versionComparator = versionComparator;
+  }
+
+  public static VersionedIntervalTimeline<String, DataSegment> forSegments(Iterable<DataSegment> segments)
+  {
+    VersionedIntervalTimeline<String, DataSegment> timeline = new VersionedIntervalTimeline<>(Ordering.natural());
+    for (final DataSegment segment : segments) {
+      timeline.add(segment.getInterval(), segment.getVersion(), segment.getShardSpec().createChunk(segment));
+    }
+    return timeline;
+  }
+
+  @VisibleForTesting
+  public Map<Interval, TreeMap<VersionType, TimelineEntry>> getAllTimelineEntries()
+  {
+    return allTimelineEntries;
   }
 
   public void add(final Interval interval, VersionType version, PartitionChunk<ObjectType> object)
@@ -150,6 +168,7 @@ public class VersionedIntervalTimeline<VersionType, ObjectType> implements Timel
     }
   }
 
+  @Override
   public PartitionHolder<ObjectType> findEntry(Interval interval, VersionType version)
   {
     try {
@@ -179,8 +198,9 @@ public class VersionedIntervalTimeline<VersionType, ObjectType> implements Timel
    * @param interval interval to find objects for
    *
    * @return Holders representing the interval that the objects exist for, PartitionHolders
-   *         are guaranteed to be complete
+   * are guaranteed to be complete
    */
+  @Override
   public List<TimelineObjectHolder<VersionType, ObjectType>> lookup(Interval interval)
   {
     try {
@@ -193,7 +213,7 @@ public class VersionedIntervalTimeline<VersionType, ObjectType> implements Timel
   }
 
   @Override
-  public Iterable<TimelineObjectHolder<VersionType, ObjectType>> lookupWithIncompletePartitions(Interval interval)
+  public List<TimelineObjectHolder<VersionType, ObjectType>> lookupWithIncompletePartitions(Interval interval)
   {
     try {
       lock.readLock().lock();
@@ -244,13 +264,55 @@ public class VersionedIntervalTimeline<VersionType, ObjectType> implements Timel
               new TimelineObjectHolder<VersionType, ObjectType>(
                   object.getTrueInterval(),
                   object.getVersion(),
-                  object.getPartitionHolder()
+                  new PartitionHolder<ObjectType>(object.getPartitionHolder())
               )
           );
         }
       }
 
       return retVal;
+    }
+    finally {
+      lock.readLock().unlock();
+    }
+  }
+
+  public boolean isOvershadowed(Interval interval, VersionType version)
+  {
+    try {
+      lock.readLock().lock();
+
+      TimelineEntry entry = completePartitionsTimeline.get(interval);
+      if (entry != null) {
+        return versionComparator.compare(version, entry.getVersion()) < 0;
+      }
+
+      Interval lower = completePartitionsTimeline.floorKey(
+          new Interval(interval.getStart(), DateTimes.MAX)
+      );
+
+      if (lower == null || !lower.overlaps(interval)) {
+        return false;
+      }
+
+      Interval prev = null;
+      Interval curr = lower;
+
+      do {
+        if (curr == null ||  //no further keys
+            (prev != null && curr.getStartMillis() > prev.getEndMillis()) || //a discontinuity
+            //lower or same version
+            versionComparator.compare(version, completePartitionsTimeline.get(curr).getVersion()) >= 0
+            ) {
+          return false;
+        }
+
+        prev = curr;
+        curr = completePartitionsTimeline.higherKey(curr);
+
+      } while (interval.getEndMillis() > prev.getEndMillis());
+
+      return true;
     }
     finally {
       lock.readLock().unlock();
@@ -293,10 +355,10 @@ public class VersionedIntervalTimeline<VersionType, ObjectType> implements Timel
   }
 
   /**
-   *
    * @param timeline
    * @param key
    * @param entry
+   *
    * @return boolean flag indicating whether or not we inserted or discarded something
    */
   private boolean addAtKey(
@@ -354,13 +416,11 @@ public class VersionedIntervalTimeline<VersionType, ObjectType> implements Timel
           // This occurs when restoring segments
           timeline.remove(currKey);
         } else {
-          throw new UnsupportedOperationException(
-              String.format(
-                  "Cannot add overlapping segments [%s and %s] with the same version [%s]",
-                  currKey,
-                  entryInterval,
-                  entry.getVersion()
-              )
+          throw new UOE(
+              "Cannot add overlapping segments [%s and %s] with the same version [%s]",
+              currKey,
+              entryInterval,
+              entry.getVersion()
           );
         }
       }
@@ -422,9 +482,16 @@ public class VersionedIntervalTimeline<VersionType, ObjectType> implements Timel
 
     for (Map.Entry<Interval, TreeMap<VersionType, TimelineEntry>> versionEntry : allTimelineEntries.entrySet()) {
       if (versionEntry.getKey().overlap(interval) != null) {
-        TimelineEntry timelineEntry = versionEntry.getValue().lastEntry().getValue();
-        if (timelineEntry.getPartitionHolder().isComplete() || incompleteOk) {
-          add(timeline, versionEntry.getKey(), timelineEntry);
+        if (incompleteOk) {
+          add(timeline, versionEntry.getKey(), versionEntry.getValue().lastEntry().getValue());
+        } else {
+          for (VersionType ver : versionEntry.getValue().descendingKeySet()) {
+            TimelineEntry timelineEntry = versionEntry.getValue().get(ver);
+            if (timelineEntry.getPartitionHolder().isComplete()) {
+              add(timeline, versionEntry.getKey(), timelineEntry);
+              break;
+            }
+          }
         }
       }
     }
@@ -446,7 +513,7 @@ public class VersionedIntervalTimeline<VersionType, ObjectType> implements Timel
             new TimelineObjectHolder<VersionType, ObjectType>(
                 timelineInterval,
                 val.getVersion(),
-                val.getPartitionHolder()
+                new PartitionHolder<ObjectType>(val.getPartitionHolder())
             )
         );
       }
@@ -492,9 +559,9 @@ public class VersionedIntervalTimeline<VersionType, ObjectType> implements Timel
 
     public TimelineEntry(Interval trueInterval, VersionType version, PartitionHolder<ObjectType> partitionHolder)
     {
-      this.trueInterval = trueInterval;
-      this.version = version;
-      this.partitionHolder = partitionHolder;
+      this.trueInterval = Preconditions.checkNotNull(trueInterval);
+      this.version = Preconditions.checkNotNull(version);
+      this.partitionHolder = Preconditions.checkNotNull(partitionHolder);
     }
 
     public Interval getTrueInterval()
@@ -510,6 +577,40 @@ public class VersionedIntervalTimeline<VersionType, ObjectType> implements Timel
     public PartitionHolder<ObjectType> getPartitionHolder()
     {
       return partitionHolder;
+    }
+
+    @Override
+    public boolean equals(Object o)
+    {
+      if (this == o) {
+        return true;
+      }
+
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
+
+      final TimelineEntry that = (TimelineEntry) o;
+
+      if (!this.trueInterval.equals(that.trueInterval)) {
+        return false;
+      }
+
+      if (!this.version.equals(that.version)) {
+        return false;
+      }
+
+      if (!this.partitionHolder.equals(that.partitionHolder)) {
+        return false;
+      }
+
+      return true;
+    }
+
+    @Override
+    public int hashCode()
+    {
+      return Objects.hash(trueInterval, version, partitionHolder);
     }
   }
 }

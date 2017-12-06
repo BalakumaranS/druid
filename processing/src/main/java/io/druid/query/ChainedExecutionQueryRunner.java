@@ -28,12 +28,12 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
-import com.metamx.common.ISE;
-import com.metamx.common.guava.BaseSequence;
-import com.metamx.common.guava.MergeIterable;
-import com.metamx.common.guava.Sequence;
-import com.metamx.common.guava.Sequences;
-import com.metamx.common.logger.Logger;
+import io.druid.java.util.common.ISE;
+import io.druid.java.util.common.guava.BaseSequence;
+import io.druid.java.util.common.guava.MergeIterable;
+import io.druid.java.util.common.guava.Sequence;
+import io.druid.java.util.common.guava.Sequences;
+import io.druid.java.util.common.logger.Logger;
 
 import java.util.Arrays;
 import java.util.Iterator;
@@ -89,11 +89,12 @@ public class ChainedExecutionQueryRunner<T> implements QueryRunner<T>
   }
 
   @Override
-  public Sequence<T> run(final Query<T> query, final Map<String, Object> responseContext)
+  public Sequence<T> run(final QueryPlus<T> queryPlus, final Map<String, Object> responseContext)
   {
-    final int priority = BaseQuery.getContextPriority(query, 0);
+    Query<T> query = queryPlus.getQuery();
+    final int priority = QueryContexts.getPriority(query);
     final Ordering ordering = query.getResultOrdering();
-
+    final QueryPlus<T> threadSafeQueryPlus = queryPlus.withoutThreadUnsafeState();
     return new BaseSequence<T, Iterator<T>>(
         new BaseSequence.IteratorMaker<T, Iterator<T>>()
         {
@@ -121,7 +122,7 @@ public class ChainedExecutionQueryRunner<T> implements QueryRunner<T>
                                   public Iterable<T> call() throws Exception
                                   {
                                     try {
-                                      Sequence<T> result = input.run(query, responseContext);
+                                      Sequence<T> result = input.run(threadSafeQueryPlus, responseContext);
                                       if (result == null) {
                                         throw new ISE("Got a null result! Segments are missing!");
                                       }
@@ -152,26 +153,25 @@ public class ChainedExecutionQueryRunner<T> implements QueryRunner<T>
             queryWatcher.registerQuery(query, futures);
 
             try {
-              final Number timeout = query.getContextValue(QueryContextKeys.TIMEOUT, (Number) null);
               return new MergeIterable<>(
                   ordering.nullsFirst(),
-                  timeout == null ?
-                  futures.get() :
-                  futures.get(timeout.longValue(), TimeUnit.MILLISECONDS)
+                  QueryContexts.hasTimeout(query) ?
+                      futures.get(QueryContexts.getTimeout(query), TimeUnit.MILLISECONDS) :
+                      futures.get()
               ).iterator();
             }
             catch (InterruptedException e) {
               log.warn(e, "Query interrupted, cancelling pending results, query id [%s]", query.getId());
               futures.cancel(true);
-              throw new QueryInterruptedException("Query interrupted");
+              throw new QueryInterruptedException(e);
             }
             catch (CancellationException e) {
-              throw new QueryInterruptedException("Query cancelled");
+              throw new QueryInterruptedException(e);
             }
             catch (TimeoutException e) {
               log.info("Query timeout, cancelling pending results for query id [%s]", query.getId());
               futures.cancel(true);
-              throw new QueryInterruptedException("Query timeout");
+              throw new QueryInterruptedException(e);
             }
             catch (ExecutionException e) {
               throw Throwables.propagate(e.getCause());

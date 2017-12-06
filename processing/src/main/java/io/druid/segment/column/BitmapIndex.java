@@ -19,22 +19,29 @@
 
 package io.druid.segment.column;
 
-import com.metamx.collections.bitmap.BitmapFactory;
-import com.metamx.collections.bitmap.ImmutableBitmap;
+import io.druid.collections.bitmap.BitmapFactory;
+import io.druid.collections.bitmap.ImmutableBitmap;
 
 /**
  */
 public interface BitmapIndex
 {
-  public int getCardinality();
+  int getCardinality();
 
-  public String getValue(int index);
+  String getValue(int index);
 
-  public boolean hasNulls();
+  boolean hasNulls();
 
-  public BitmapFactory getBitmapFactory();
+  BitmapFactory getBitmapFactory();
 
-  public ImmutableBitmap getBitmap(String value);
+  /**
+   * Returns the index of "value" in this BitmapIndex, or (-(insertion point) - 1) if the value is not
+   * present, in the manner of Arrays.binarySearch.
+   *
+   * @param value value to search for
+   * @return index of value, or negative number equal to (-(insertion point) - 1).
+   */
+  int getIndex(String value);
 
-  public ImmutableBitmap getBitmap(int idx);
+  ImmutableBitmap getBitmap(int idx);
 }

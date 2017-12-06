@@ -19,18 +19,21 @@
 
 package io.druid.query.filter;
 
-import com.metamx.collections.bitmap.BitmapFactory;
-import com.metamx.collections.bitmap.ImmutableBitmap;
-import com.metamx.collections.spatial.ImmutableRTree;
+import io.druid.collections.bitmap.BitmapFactory;
+import io.druid.collections.bitmap.ImmutableBitmap;
+import io.druid.collections.spatial.ImmutableRTree;
+import io.druid.segment.column.BitmapIndex;
 import io.druid.segment.data.Indexed;
 
 /**
  */
 public interface BitmapIndexSelector
 {
-  public Indexed<String> getDimensionValues(String dimension);
-  public int getNumRows();
-  public BitmapFactory getBitmapFactory();
-  public ImmutableBitmap getBitmapIndex(String dimension, String value);
-  public ImmutableRTree getSpatialIndex(String dimension);
+  Indexed<String> getDimensionValues(String dimension);
+  boolean hasMultipleValues(String dimension);
+  int getNumRows();
+  BitmapFactory getBitmapFactory();
+  BitmapIndex getBitmapIndex(String dimension);
+  ImmutableBitmap getBitmapIndex(String dimension, String value);
+  ImmutableRTree getSpatialIndex(String dimension);
 }

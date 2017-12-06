@@ -21,8 +21,8 @@ package io.druid.segment.data;
 
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
-import com.metamx.collections.bitmap.BitmapFactory;
-import com.metamx.collections.bitmap.ImmutableBitmap;
+import io.druid.collections.bitmap.BitmapFactory;
+import io.druid.collections.bitmap.ImmutableBitmap;
 
 /**
  */
@@ -33,7 +33,7 @@ import com.metamx.collections.bitmap.ImmutableBitmap;
 })
 public interface BitmapSerdeFactory
 {
-  public ObjectStrategy<ImmutableBitmap> getObjectStrategy();
+  ObjectStrategy<ImmutableBitmap> getObjectStrategy();
 
-  public BitmapFactory getBitmapFactory();
+  BitmapFactory getBitmapFactory();
 }

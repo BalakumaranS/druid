@@ -19,16 +19,19 @@
 
 package io.druid.query.extraction;
 
+import com.fasterxml.jackson.annotation.JacksonInject;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
-import com.metamx.common.StringUtils;
+import io.druid.java.util.common.StringUtils;
+import io.druid.js.JavaScriptConfig;
 import org.mozilla.javascript.Context;
 import org.mozilla.javascript.ContextFactory;
 import org.mozilla.javascript.ScriptableObject;
 
+import javax.annotation.Nullable;
 import java.nio.ByteBuffer;
 
 public class JavaScriptExtractionFn implements ExtractionFn
@@ -37,7 +40,7 @@ public class JavaScriptExtractionFn implements ExtractionFn
   {
     final ContextFactory contextFactory = ContextFactory.getGlobal();
     final Context context = contextFactory.enterContext();
-    context.setOptimizationLevel(9);
+    context.setOptimizationLevel(JavaScriptConfig.DEFAULT_OPTIMIZATION_LEVEL);
 
     final ScriptableObject scope = context.initStandardObjects();
 
@@ -47,6 +50,7 @@ public class JavaScriptExtractionFn implements ExtractionFn
 
     return new Function<Object, String>()
     {
+      @Override
       public String apply(Object input)
       {
         // ideally we need a close() function to discard the context once it is not used anymore
@@ -62,20 +66,24 @@ public class JavaScriptExtractionFn implements ExtractionFn
   }
 
   private final String function;
-  private final Function<Object, String> fn;
   private final boolean injective;
+  private final JavaScriptConfig config;
+
+  // This variable is lazily initialized to avoid unnecessary JavaScript compilation during JSON serde
+  private Function<Object, String> fn;
 
   @JsonCreator
   public JavaScriptExtractionFn(
       @JsonProperty("function") String function,
-      @JsonProperty("injective") boolean injective
+      @JsonProperty("injective") boolean injective,
+      @JacksonInject JavaScriptConfig config
   )
   {
     Preconditions.checkNotNull(function, "function must not be null");
 
     this.function = function;
-    this.fn = compile(function);
     this.injective = injective;
+    this.config = config;
   }
 
   @JsonProperty
@@ -101,15 +109,37 @@ public class JavaScriptExtractionFn implements ExtractionFn
   }
 
   @Override
-  public String apply(Object value)
+  @Nullable
+  public String apply(@Nullable Object value)
   {
+    checkAndCompileScript();
     return Strings.emptyToNull(fn.apply(value));
   }
 
-  @Override
-  public String apply(String value)
+  /**
+   * {@link #apply(Object)} can be called by multiple threads, so this function should be thread-safe to avoid extra
+   * script compilation.
+   */
+  private void checkAndCompileScript()
   {
-    return this.apply((Object) value);
+    if (fn == null) {
+      // JavaScript configuration should be checked when it's actually used because someone might still want Druid
+      // nodes to be able to deserialize JavaScript-based objects even though JavaScript is disabled.
+      Preconditions.checkState(config.isEnabled(), "JavaScript is disabled");
+
+      synchronized (config) {
+        if (fn == null) {
+          fn = compile(function);
+        }
+      }
+    }
+  }
+
+  @Override
+  @Nullable
+  public String apply(@Nullable String value)
+  {
+    return this.apply((Object) Strings.emptyToNull(value));
   }
 
   @Override

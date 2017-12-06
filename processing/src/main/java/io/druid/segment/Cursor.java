@@ -17,16 +17,21 @@
  * under the License.
  */
 
-package io.druid.segment;import org.joda.time.DateTime;
+package io.druid.segment;
+
+import org.joda.time.DateTime;
 
 /**
  */
 
-public interface Cursor extends ColumnSelectorFactory
+public interface Cursor
 {
-  public DateTime getTime();
-  public void advance();
-  public void advanceTo(int offset);
-  public boolean isDone();
-  public void reset();
+  ColumnSelectorFactory getColumnSelectorFactory();
+  DateTime getTime();
+  void advance();
+  void advanceUninterruptibly();
+  void advanceTo(int offset);
+  boolean isDone();
+  boolean isDoneOrInterrupted();
+  void reset();
 }

@@ -19,29 +19,50 @@
 
 package io.druid.cli.validate;
 
+import com.fasterxml.jackson.databind.Module;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Throwables;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Iterables;
 import com.google.common.io.CharSource;
 import com.google.common.io.LineProcessor;
 import com.google.common.io.Resources;
-import com.metamx.common.UOE;
-import com.metamx.common.logger.Logger;
+import com.google.inject.Binder;
+import com.google.inject.Injector;
+import com.google.inject.name.Names;
 import io.airlift.airline.Command;
 import io.airlift.airline.Option;
+import io.druid.cli.GuiceRunnable;
 import io.druid.data.input.InputRow;
 import io.druid.data.input.impl.StringInputRowParser;
+import io.druid.guice.DruidProcessingModule;
+import io.druid.guice.ExtensionsConfig;
+import io.druid.guice.FirehoseModule;
+import io.druid.guice.IndexingServiceFirehoseModule;
+import io.druid.guice.LocalDataStorageDruidModule;
+import io.druid.guice.ParsersModule;
+import io.druid.guice.QueryRunnerFactoryModule;
+import io.druid.guice.QueryableModule;
 import io.druid.indexer.HadoopDruidIndexerConfig;
+import io.druid.indexer.IndexingHadoopModule;
 import io.druid.indexing.common.task.Task;
-import io.druid.jackson.DefaultObjectMapper;
+import io.druid.initialization.DruidModule;
+import io.druid.initialization.Initialization;
+import io.druid.java.util.common.UOE;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.query.Query;
 import org.apache.commons.io.output.NullWriter;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.io.Writer;
 import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.List;
 
 /**
  */
@@ -49,9 +70,10 @@ import java.nio.charset.Charset;
     name = "validator",
     description = "Validates that a given Druid JSON object is correctly formatted"
 )
-public class DruidJsonValidator implements Runnable
+public class DruidJsonValidator extends GuiceRunnable
 {
-  private Writer logWriter = new PrintWriter(System.out);
+  private static final Logger LOG = new Logger(DruidJsonValidator.class);
+  private Writer logWriter = new PrintWriter(new OutputStreamWriter(System.out, StandardCharsets.UTF_8));
 
   @Option(name = "-f", title = "file", description = "file to validate", required = true)
   public String jsonFile;
@@ -65,15 +87,58 @@ public class DruidJsonValidator implements Runnable
   @Option(name = "--log", title = "toLogger", description = "redirects any outputs to logger", required = false)
   public boolean toLogger;
 
+  public DruidJsonValidator()
+  {
+    super(LOG);
+  }
+
+  @Override
+  protected List<? extends com.google.inject.Module> getModules()
+  {
+    return ImmutableList.<com.google.inject.Module>of(
+        // It's unknown if those modules are required in DruidJsonValidator.
+        // Maybe some of those modules could be removed.
+        // See https://github.com/druid-io/druid/pull/4429#discussion_r123603498
+        new DruidProcessingModule(),
+        new QueryableModule(),
+        new QueryRunnerFactoryModule(),
+        new com.google.inject.Module()
+        {
+          @Override
+          public void configure(Binder binder)
+          {
+            binder.bindConstant().annotatedWith(Names.named("serviceName")).to("druid/validator");
+            binder.bindConstant().annotatedWith(Names.named("servicePort")).to(0);
+            binder.bindConstant().annotatedWith(Names.named("tlsServicePort")).to(-1);
+          }
+        }
+    );
+  }
+
   @Override
   public void run()
   {
     File file = new File(jsonFile);
     if (!file.exists()) {
-      System.out.printf("File[%s] does not exist.%n", file);
+      LOG.info("File[%s] does not exist.%n", file);
     }
 
-    final ObjectMapper jsonMapper = new DefaultObjectMapper();
+    final Injector injector = makeInjector();
+    final ObjectMapper jsonMapper = injector.getInstance(ObjectMapper.class);
+
+    registerModules(
+        jsonMapper,
+        Iterables.concat(
+            Initialization.getFromExtensions(injector.getInstance(ExtensionsConfig.class), DruidModule.class),
+            Arrays.asList(
+                new FirehoseModule(),
+                new IndexingHadoopModule(),
+                new IndexingServiceFirehoseModule(),
+                new LocalDataStorageDruidModule(),
+                new ParsersModule()
+            )
+        )
+    );
 
     final ClassLoader loader;
     if (Thread.currentThread().getContextClassLoader() != null) {
@@ -114,6 +179,7 @@ public class DruidJsonValidator implements Runnable
           logWriter.write("cannot find proper spec from 'file'.. regarding it as a json spec");
           parser = jsonMapper.readValue(jsonFile, StringInputRowParser.class);
         }
+        parser.initializeParser();
         if (resource != null) {
           final CharSource source;
           if (new File(resource).isFile()) {
@@ -141,8 +207,17 @@ public class DruidJsonValidator implements Runnable
       }
     }
     catch (Exception e) {
-      System.out.println("INVALID JSON!");
+      LOG.error(e, "INVALID JSON!");
       throw Throwables.propagate(e);
+    }
+  }
+
+  private void registerModules(ObjectMapper jsonMapper, Iterable<DruidModule> fromExtensions)
+  {
+    for (DruidModule druidModule : fromExtensions) {
+      for (Module module : druidModule.getJacksonModules()) {
+        jsonMapper.registerModule(module);
+      }
     }
   }
 

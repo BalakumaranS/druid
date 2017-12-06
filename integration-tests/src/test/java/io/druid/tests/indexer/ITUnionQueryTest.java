@@ -22,14 +22,15 @@ package io.druid.tests.indexer;
 import com.beust.jcommander.internal.Lists;
 import com.google.common.base.Throwables;
 import com.google.inject.Inject;
-import com.metamx.common.logger.Logger;
 import com.metamx.http.client.HttpClient;
 import io.druid.curator.discovery.ServerDiscoveryFactory;
 import io.druid.curator.discovery.ServerDiscoverySelector;
-import io.druid.guice.annotations.Global;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.logger.Logger;
 import io.druid.testing.IntegrationTestingConfig;
 import io.druid.testing.clients.EventReceiverFirehoseTestClient;
 import io.druid.testing.guice.DruidTestModuleFactory;
+import io.druid.testing.guice.TestClient;
 import io.druid.testing.utils.RetryUtil;
 import io.druid.testing.utils.ServerDiscoveryUtil;
 import org.joda.time.DateTime;
@@ -54,7 +55,7 @@ public class ITUnionQueryTest extends AbstractIndexerTest
   ServerDiscoveryFactory factory;
 
   @Inject
-  @Global
+  @TestClient
   HttpClient httpClient;
 
   @Inject
@@ -63,13 +64,13 @@ public class ITUnionQueryTest extends AbstractIndexerTest
   @Test
   public void testUnionQuery() throws Exception
   {
-    final int numTasks = 4;
+    final int numTasks = 3;
 
     try {
       // Load 4 datasources with same dimensions
       String task = setShutOffTime(
           getTaskAsString(UNION_TASK_RESOURCE),
-          new DateTime(System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(3))
+          DateTimes.utc(System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(3))
       );
       List<String> taskIDs = Lists.newArrayList();
       for (int i = 0; i < numTasks; i++) {
@@ -86,8 +87,21 @@ public class ITUnionQueryTest extends AbstractIndexerTest
         postEvents(i);
       }
 
-      // sleep for a while to let the events ingested
-      TimeUnit.SECONDS.sleep(5);
+      // wait until all events are ingested
+      RetryUtil.retryUntil(
+          () -> {
+            for (int i = 0; i < numTasks; i++) {
+              if (queryHelper.countRows(UNION_DATASOURCE + i, "2013-08-31/2013-09-01") < 5) {
+                return false;
+              }
+            }
+            return true;
+          },
+          true,
+          1000,
+          100,
+          "Waiting all events are ingested"
+      );
 
       // should hit the queries on realtime task
       LOG.info("Running Union Queries..");
@@ -110,7 +124,7 @@ public class ITUnionQueryTest extends AbstractIndexerTest
               }
             },
             true,
-            60000,
+            10000,
             10,
             "Real-time generated segments loaded"
         );
@@ -120,7 +134,7 @@ public class ITUnionQueryTest extends AbstractIndexerTest
 
     }
     catch (Exception e) {
-      e.printStackTrace();
+      LOG.error(e, "Error while testing");
       throw Throwables.propagate(e);
     }
     finally {

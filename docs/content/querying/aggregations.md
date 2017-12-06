@@ -17,7 +17,7 @@ Available aggregations are:
 ```
 
 Please note the count aggregator counts the number of Druid rows, which does not always reflect the number of raw events ingested. 
-This is because Druid rolls up data at ingestion time. To 
+This is because Druid can be configured to roll up data at ingestion time. To 
 count the number of ingested rows of data, include a count aggregator at ingestion time, and a longSum aggregator at 
 query time.
 
@@ -36,10 +36,18 @@ computes the sum of values as a 64-bit, signed integer
 
 #### `doubleSum` aggregator
 
-Computes the sum of values as 64-bit floating point value. Similar to `longSum`
+Computes and stores the sum of values as 64-bit floating point value. Similar to `longSum`
 
 ```json
 { "type" : "doubleSum", "name" : <output_name>, "fieldName" : <metric_name> }
+```
+
+#### `floatSum` aggregator
+
+Computes and stores the sum of values as 32-bit floating point value. Similar to `longSum` and `doubleSum`
+
+```json
+{ "type" : "floatSum", "name" : <output_name>, "fieldName" : <metric_name> }
 ```
 
 ### Min / Max aggregators
@@ -60,6 +68,22 @@ Computes the sum of values as 64-bit floating point value. Similar to `longSum`
 { "type" : "doubleMax", "name" : <output_name>, "fieldName" : <metric_name> }
 ```
 
+#### `floatMin` aggregator
+
+`floatMin` computes the minimum of all metric values and Float.POSITIVE_INFINITY
+
+```json
+{ "type" : "floatMin", "name" : <output_name>, "fieldName" : <metric_name> }
+```
+
+#### `floatMax` aggregator
+
+`floatMax` computes the maximum of all metric values and Float.NEGATIVE_INFINITY
+
+```json
+{ "type" : "floatMax", "name" : <output_name>, "fieldName" : <metric_name> }
+```
+
 #### `longMin` aggregator
 
 `longMin` computes the minimum of all metric values and Long.MAX_VALUE
@@ -76,14 +100,88 @@ Computes the sum of values as 64-bit floating point value. Similar to `longSum`
 { "type" : "longMax", "name" : <output_name>, "fieldName" : <metric_name> }
 ```
 
+### First / Last aggregator
+
+First and Last aggregator cannot be used in ingestion spec, and should only be specified as part of queries.
+
+Note that queries with first/last aggregators on a segment created with rollup enabled will return the rolled up value, and not the last value within the raw ingested data.
+
+#### `doubleFirst` aggregator
+
+`doubleFirst` computes the metric value with the minimum timestamp or 0 if no row exist
+
+```json
+{
+  "type" : "doubleFirst",
+  "name" : <output_name>,
+  "fieldName" : <metric_name>
+}
+```
+
+#### `doubleLast` aggregator
+
+`doubleLast` computes the metric value with the maximum timestamp or 0 if no row exist
+
+```json
+{
+  "type" : "doubleLast",
+  "name" : <output_name>,
+  "fieldName" : <metric_name>
+}
+```
+
+#### `floatFirst` aggregator
+
+`floatFirst` computes the metric value with the minimum timestamp or 0 if no row exist
+
+```json
+{
+  "type" : "floatFirst",
+  "name" : <output_name>,
+  "fieldName" : <metric_name>
+}
+```
+
+#### `floatLast` aggregator
+
+`floatLast` computes the metric value with the maximum timestamp or 0 if no row exist
+
+```json
+{
+  "type" : "floatLast",
+  "name" : <output_name>,
+  "fieldName" : <metric_name>
+}
+```
+
+#### `longFirst` aggregator
+
+`longFirst` computes the metric value with the minimum timestamp or 0 if no row exist
+
+```json
+{
+  "type" : "longFirst",
+  "name" : <output_name>,
+  "fieldName" : <metric_name>
+}
+```
+
+#### `longLast` aggregator
+
+`longLast` computes the metric value with the maximum timestamp or 0 if no row exist
+
+```json
+{ 
+  "type" : "longLast",
+  "name" : <output_name>, 
+  "fieldName" : <metric_name>,
+}
+```
+
 ### JavaScript aggregator
 
-Computes an arbitrary JavaScript function over a set of columns (both metrics and dimensions).
-
-All JavaScript functions must return numerical values.
-
-JavaScript aggregators are much slower than native Java aggregators and if performance is critical, you should implement 
-your functionality as a native Java aggregator.
+Computes an arbitrary JavaScript function over a set of columns (both metrics and dimensions are allowed). Your
+JavaScript functions are expected to return floating-point values.
 
 ```json
 { "type": "javascript",
@@ -111,8 +209,9 @@ your functionality as a native Java aggregator.
 }
 ```
 
-The javascript aggregator is recommended for rapidly prototyping features. This aggregator will be much slower in production 
-use than a native Java aggregator.
+<div class="note info">
+JavaScript-based functionality is disabled by default. Please refer to the Druid <a href="../development/javascript.html">JavaScript programming guide</a> for guidelines about using Druid's JavaScript functionality, including instructions on how to enable it.
+</div>
 
 ## Approximate Aggregations
 
@@ -127,10 +226,17 @@ instead of the cardinality aggregator if you do not care about the individual va
 {
   "type": "cardinality",
   "name": "<output_name>",
-  "fieldNames": [ <dimension1>, <dimension2>, ... ],
-  "byRow": <false | true> # (optional, defaults to false)
+  "fields": [ <dimension1>, <dimension2>, ... ],
+  "byRow": <false | true> # (optional, defaults to false),
+  "round": <false | true> # (optional, defaults to false)
 }
 ```
+
+Each individual element of the "fields" list can be a String or [DimensionSpec](../querying/dimensionspecs.html). A String dimension in the fields list is equivalent to a DefaultDimensionSpec (no transformations).
+
+The HyperLogLog algorithm generates decimal estimates with some error. "round" can be set to true to round off estimated
+values to whole numbers. Note that even with rounding, the cardinality is still an estimate. The "round" field only
+affects query-time behavior, and is ignored at ingestion-time.
 
 #### Cardinality by value
 
@@ -171,7 +277,7 @@ Determine the number of distinct countries people are living in or have come fro
 {
   "type": "cardinality",
   "name": "distinct_countries",
-  "fieldNames": [ "coutry_of_origin", "country_of_residence" ]
+  "fields": [ "country_of_origin", "country_of_residence" ]
 }
 ```
 
@@ -181,20 +287,52 @@ Determine the number of distinct people (i.e. combinations of first and last nam
 {
   "type": "cardinality",
   "name": "distinct_people",
-  "fieldNames": [ "first_name", "last_name" ],
+  "fields": [ "first_name", "last_name" ],
   "byRow" : true
 }
 ```
+
+Determine the number of distinct starting characters of last names
+
+```json
+{
+  "type": "cardinality",
+  "name": "distinct_last_name_first_char",
+  "fields": [
+    {
+     "type" : "extraction",
+     "dimension" : "last_name",
+     "outputName" :  "last_name_first_char",
+     "extractionFn" : { "type" : "substring", "index" : 0, "length" : 1 }
+    }
+  ],
+  "byRow" : true
+}
+```
+
 
 ### HyperUnique aggregator
 
 Uses [HyperLogLog](http://algo.inria.fr/flajolet/Publications/FlFuGaMe07.pdf) to compute the estimated cardinality of a dimension that has been aggregated as a "hyperUnique" metric at indexing time.
 
 ```json
-{ "type" : "hyperUnique", "name" : <output_name>, "fieldName" : <metric_name> }
+{ 
+  "type" : "hyperUnique",
+  "name" : <output_name>,
+  "fieldName" : <metric_name>,
+  "isInputHyperUnique" : false,
+  "round" : false
+}
 ```
 
-For more approximate aggregators, please see [theta sketches](../development/datasketches-aggregators.html).
+"isInputHyperUnique" can be set to true to index pre-computed HLL (Base64 encoded output from druid-hll is expected).
+The "isInputHyperUnique" field only affects ingestion-time behavior, and is ignored at query-time.
+
+The HyperLogLog algorithm generates decimal estimates with some error. "round" can be set to true to round off estimated
+values to whole numbers. Note that even with rounding, the cardinality is still an estimate. The "round" field only
+affects query-time behavior, and is ignored at ingestion-time.
+
+For more approximate aggregators, please see [theta sketches](../development/extensions-core/datasketches-aggregators.html).
 
 ## Miscellaneous Aggregations
 
@@ -203,8 +341,6 @@ For more approximate aggregators, please see [theta sketches](../development/dat
 A filtered aggregator wraps any given aggregator, but only aggregates the values for which the given dimension filter matches.
 
 This makes it possible to compute the results of a filtered and an unfiltered aggregation simultaneously, without having to issue multiple queries, and use both results as part of post-aggregations.
-
-*Limitations:* The filtered aggregator currently only supports 'or', 'and', 'selector', 'not' and 'Extraction' filters, i.e. matching one or multiple dimensions against a single value.
 
 *Note:* If only the filtered results are required, consider putting the filter on the query itself, which will be much faster since it does not require scanning all the data.
 

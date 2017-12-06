@@ -19,26 +19,16 @@
 
 package io.druid.segment.incremental;
 
+import io.druid.java.util.common.StringUtils;
+
 import java.io.IOException;
 
 public class IndexSizeExceededException extends IOException
 {
-  public IndexSizeExceededException()
-  {
-  }
 
   public IndexSizeExceededException(String formatText, Object... arguments)
   {
-    super(String.format(formatText, arguments));
+    super(StringUtils.nonStrictFormat(formatText, arguments));
   }
 
-  public IndexSizeExceededException(Throwable cause, String formatText, Object... arguments)
-  {
-    super(String.format(formatText, arguments), cause);
-  }
-
-  public IndexSizeExceededException(Throwable cause)
-  {
-    super(cause);
-  }
 }

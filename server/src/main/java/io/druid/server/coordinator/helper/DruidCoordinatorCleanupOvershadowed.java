@@ -20,20 +20,19 @@
 package io.druid.server.coordinator.helper;
 
 import com.google.common.collect.Maps;
-import com.google.common.collect.MinMaxPriorityQueue;
-import com.metamx.common.guava.Comparators;
 import io.druid.client.ImmutableDruidDataSource;
 import io.druid.client.ImmutableDruidServer;
+import io.druid.java.util.common.guava.Comparators;
 import io.druid.server.coordinator.CoordinatorStats;
 import io.druid.server.coordinator.DruidCluster;
 import io.druid.server.coordinator.DruidCoordinator;
 import io.druid.server.coordinator.DruidCoordinatorRuntimeParams;
 import io.druid.server.coordinator.ServerHolder;
 import io.druid.timeline.DataSegment;
-import io.druid.timeline.TimelineObjectHolder;
 import io.druid.timeline.VersionedIntervalTimeline;
 
 import java.util.Map;
+import java.util.SortedSet;
 
 public class DruidCoordinatorCleanupOvershadowed implements DruidCoordinatorHelper
 {
@@ -55,7 +54,7 @@ public class DruidCoordinatorCleanupOvershadowed implements DruidCoordinatorHelp
       DruidCluster cluster = params.getDruidCluster();
       Map<String, VersionedIntervalTimeline<String, DataSegment>> timelines = Maps.newHashMap();
 
-      for (MinMaxPriorityQueue<ServerHolder> serverHolders : cluster.getSortedServersByTier()) {
+      for (SortedSet<ServerHolder> serverHolders : cluster.getSortedHistoricalsByTier()) {
         for (ServerHolder serverHolder : serverHolders) {
           ImmutableDruidServer server = serverHolder.getServer();
 
@@ -75,16 +74,15 @@ public class DruidCoordinatorCleanupOvershadowed implements DruidCoordinatorHelp
         }
       }
 
-      for (VersionedIntervalTimeline<String, DataSegment> timeline : timelines.values()) {
-        for (TimelineObjectHolder<String, DataSegment> holder : timeline.findOvershadowed()) {
-          for (DataSegment dataSegment : holder.getObject().payloads()) {
-            coordinator.removeSegment(dataSegment);
-            stats.addToGlobalStat("overShadowedCount", 1);
-          }
+      //Remove all segments in db that are overshadowed by served segments
+      for (DataSegment dataSegment : params.getAvailableSegments()) {
+        VersionedIntervalTimeline<String, DataSegment> timeline = timelines.get(dataSegment.getDataSource());
+        if (timeline != null && timeline.isOvershadowed(dataSegment.getInterval(), dataSegment.getVersion())) {
+          coordinator.removeSegment(dataSegment);
+          stats.addToGlobalStat("overShadowedCount", 1);
         }
       }
     }
-
     return params.buildFromExisting()
                  .withCoordinatorStats(stats)
                  .build();

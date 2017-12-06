@@ -20,7 +20,8 @@
 package io.druid.query.timeseries;
 
 import com.google.common.collect.ImmutableMap;
-import io.druid.granularity.QueryGranularity;
+import io.druid.java.util.common.DateTimes;
+import io.druid.java.util.common.granularity.Granularities;
 import io.druid.query.Result;
 import io.druid.query.aggregation.AggregatorFactory;
 import io.druid.query.aggregation.CountAggregatorFactory;
@@ -42,7 +43,7 @@ public class TimeseriesBinaryFnTest
       rowsCount,
       indexLongSum
   );
-  final DateTime currTime = new DateTime();
+  final DateTime currTime = DateTimes.nowUtc();
 
   @Test
   public void testMerge()
@@ -77,7 +78,7 @@ public class TimeseriesBinaryFnTest
     );
 
     Result<TimeseriesResultValue> actual = new TimeseriesBinaryFn(
-        QueryGranularity.ALL,
+        Granularities.ALL,
         aggregatorFactories
     ).apply(
         result1,
@@ -109,7 +110,7 @@ public class TimeseriesBinaryFnTest
     );
 
     Result<TimeseriesResultValue> expected = new Result<TimeseriesResultValue>(
-        new DateTime(QueryGranularity.DAY.truncate(currTime.getMillis())),
+        Granularities.DAY.bucketStart(currTime),
         new TimeseriesResultValue(
             ImmutableMap.<String, Object>of(
                 "rows", 3L,
@@ -119,7 +120,7 @@ public class TimeseriesBinaryFnTest
     );
 
     Result<TimeseriesResultValue> actual = new TimeseriesBinaryFn(
-        QueryGranularity.DAY,
+        Granularities.DAY,
         aggregatorFactories
     ).apply(
         result1,
@@ -145,7 +146,7 @@ public class TimeseriesBinaryFnTest
     Result<TimeseriesResultValue> expected = result1;
 
     Result<TimeseriesResultValue> actual = new TimeseriesBinaryFn(
-        QueryGranularity.ALL,
+        Granularities.ALL,
         aggregatorFactories
     ).apply(
         result1,
@@ -187,7 +188,7 @@ public class TimeseriesBinaryFnTest
     );
 
     Result<TimeseriesResultValue> actual = new TimeseriesBinaryFn(
-        QueryGranularity.ALL,
+        Granularities.ALL,
         aggregatorFactories
     ).apply(
         result1,

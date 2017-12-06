@@ -19,12 +19,16 @@
 
 package io.druid.query.extraction;
 
+import javax.annotation.Nullable;
+import java.util.Objects;
+
 public abstract class DimExtractionFn implements ExtractionFn
 {
   @Override
-  public String apply(Object value)
+  @Nullable
+  public String apply(@Nullable Object value)
   {
-    return apply(value == null ? null : value.toString());
+    return apply(Objects.toString(value, null));
   }
 
   @Override

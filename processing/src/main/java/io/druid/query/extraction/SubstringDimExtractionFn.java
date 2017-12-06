@@ -23,6 +23,7 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
+import io.druid.java.util.common.StringUtils;
 
 import javax.annotation.Nullable;
 import java.nio.ByteBuffer;
@@ -31,8 +32,6 @@ import java.nio.ByteBuffer;
  */
 public class SubstringDimExtractionFn extends DimExtractionFn
 {
-  private static final byte CACHE_TYPE_ID = 0x8;
-
   private final int index;
   private final int end;
 
@@ -54,14 +53,15 @@ public class SubstringDimExtractionFn extends DimExtractionFn
   public byte[] getCacheKey()
   {
     return ByteBuffer.allocate(1 + 8)
-                     .put(CACHE_TYPE_ID)
+                     .put(ExtractionCacheHelper.CACHE_TYPE_ID_SUBSTRING)
                      .putInt(this.index)
                      .putInt(this.end)
                      .array();
   }
 
+  @Nullable
   @Override
-  public String apply(String dimValue)
+  public String apply(@Nullable String dimValue)
   {
     if (Strings.isNullOrEmpty(dimValue)) {
       return null;
@@ -129,5 +129,11 @@ public class SubstringDimExtractionFn extends DimExtractionFn
     int result = index;
     result = 31 * result + end;
     return result;
+  }
+
+  @Override
+  public String toString()
+  {
+    return StringUtils.format("substring(%s, %s)", index, getLength());
   }
 }

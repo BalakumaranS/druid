@@ -20,8 +20,8 @@
 package io.druid.query;
 
 import com.google.common.base.Function;
-import com.metamx.common.guava.Sequence;
-import com.metamx.common.guava.Sequences;
+import io.druid.java.util.common.guava.Sequence;
+import io.druid.java.util.common.guava.Sequences;
 
 import java.util.Map;
 
@@ -31,14 +31,13 @@ public class ConcatQueryRunner<T> implements QueryRunner<T>
 {
   private final Sequence<QueryRunner<T>> queryRunners;
 
-  public ConcatQueryRunner(
-      Sequence<QueryRunner<T>> queryRunners
-  ) {
+  public ConcatQueryRunner(Sequence<QueryRunner<T>> queryRunners)
+  {
     this.queryRunners = queryRunners;
   }
 
   @Override
-  public Sequence<T> run(final Query<T> query, final Map<String, Object> responseContext)
+  public Sequence<T> run(final QueryPlus<T> queryPlus, final Map<String, Object> responseContext)
   {
     return Sequences.concat(
         Sequences.map(
@@ -48,7 +47,7 @@ public class ConcatQueryRunner<T> implements QueryRunner<T>
               @Override
               public Sequence<T> apply(final QueryRunner<T> input)
               {
-                return input.run(query, responseContext);
+                return input.run(queryPlus, responseContext);
               }
             }
         )

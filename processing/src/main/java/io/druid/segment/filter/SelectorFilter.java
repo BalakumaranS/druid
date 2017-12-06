@@ -19,16 +19,13 @@
 
 package io.druid.segment.filter;
 
-import com.google.common.base.Strings;
-import com.metamx.collections.bitmap.ImmutableBitmap;
-import io.druid.query.dimension.DefaultDimensionSpec;
+import io.druid.java.util.common.StringUtils;
+import io.druid.query.BitmapResultFactory;
 import io.druid.query.filter.BitmapIndexSelector;
 import io.druid.query.filter.Filter;
 import io.druid.query.filter.ValueMatcher;
-import io.druid.query.filter.ValueMatcherFactory;
+import io.druid.segment.ColumnSelector;
 import io.druid.segment.ColumnSelectorFactory;
-import io.druid.segment.DimensionSelector;
-import io.druid.segment.data.IndexedInts;
 
 /**
  */
@@ -47,46 +44,40 @@ public class SelectorFilter implements Filter
   }
 
   @Override
-  public ImmutableBitmap getBitmapIndex(BitmapIndexSelector selector)
+  public <T> T getBitmapResult(BitmapIndexSelector selector, BitmapResultFactory<T> bitmapResultFactory)
   {
-    return selector.getBitmapIndex(dimension, value);
+    return bitmapResultFactory.wrapDimensionValue(selector.getBitmapIndex(dimension, value));
   }
 
   @Override
-  public ValueMatcher makeMatcher(ValueMatcherFactory factory)
+  public ValueMatcher makeMatcher(ColumnSelectorFactory factory)
   {
-    return factory.makeValueMatcher(dimension, value);
+    return Filters.makeValueMatcher(factory, dimension, value);
   }
 
   @Override
-  public ValueMatcher makeMatcher(ColumnSelectorFactory columnSelectorFactory)
+  public boolean supportsBitmapIndex(BitmapIndexSelector selector)
   {
-    final DimensionSelector dimensionSelector = columnSelectorFactory.makeDimensionSelector(
-        new DefaultDimensionSpec(dimension, dimension)
-    );
-
-    // Missing columns match a null or empty string value and don't match anything else
-    if (dimensionSelector == null) {
-      return new BooleanValueMatcher(Strings.isNullOrEmpty(value));
-    } else {
-      final int valueId = dimensionSelector.lookupId(value);
-      return new ValueMatcher()
-      {
-        @Override
-        public boolean matches()
-        {
-          final IndexedInts row = dimensionSelector.getRow();
-          final int size = row.size();
-          for (int i = 0; i < size; ++i) {
-            if (row.get(i) == valueId) {
-              return true;
-            }
-          }
-          return false;
-        }
-      };
-    }
+    return selector.getBitmapIndex(dimension) != null;
   }
 
+  @Override
+  public boolean supportsSelectivityEstimation(
+      ColumnSelector columnSelector, BitmapIndexSelector indexSelector
+  )
+  {
+    return Filters.supportsSelectivityEstimation(this, dimension, columnSelector, indexSelector);
+  }
 
+  @Override
+  public double estimateSelectivity(BitmapIndexSelector indexSelector)
+  {
+    return (double) indexSelector.getBitmapIndex(dimension, value).size() / indexSelector.getNumRows();
+  }
+
+  @Override
+  public String toString()
+  {
+    return StringUtils.format("%s = %s", dimension, value);
+  }
 }

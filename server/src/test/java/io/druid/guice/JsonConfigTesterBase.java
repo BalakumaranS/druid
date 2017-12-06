@@ -26,6 +26,7 @@ import com.google.inject.Injector;
 import com.google.inject.Module;
 import com.google.inject.name.Names;
 import io.druid.initialization.Initialization;
+import io.druid.java.util.common.StringUtils;
 import org.easymock.EasyMock;
 import org.junit.Assert;
 import org.junit.Before;
@@ -35,6 +36,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.ParameterizedType;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
@@ -54,8 +56,9 @@ public abstract class JsonConfigTesterBase<T>
   protected int assertions = 0;
   protected Properties testProperties = new Properties();
 
-  protected static String getPropertyKey(String fieldName){
-    return String.format(
+  protected static String getPropertyKey(String fieldName)
+  {
+    return StringUtils.format(
         "%s.%s",
         configPrefix, fieldName
     );
@@ -80,6 +83,7 @@ public abstract class JsonConfigTesterBase<T>
     {
       binder.bindConstant().annotatedWith(Names.named("serviceName")).to("druid/test");
       binder.bindConstant().annotatedWith(Names.named("servicePort")).to(0);
+      binder.bindConstant().annotatedWith(Names.named("tlsServicePort")).to(-1);
       JsonConfigProvider.bind(binder, configPrefix, clazz);
     }
   };
@@ -92,9 +96,9 @@ public abstract class JsonConfigTesterBase<T>
       final String propertyKey = getPropertyKey(field);
       if (null != propertyKey) {
         field.setAccessible(true);
-        String getter = String.format(
+        String getter = StringUtils.format(
             "get%s%s",
-            field.getName().substring(0, 1).toUpperCase(),
+            StringUtils.toUpperCase(field.getName().substring(0, 1)),
             field.getName().substring(1)
         );
         Method method = clazz.getDeclaredMethod(getter);
@@ -125,10 +129,15 @@ public abstract class JsonConfigTesterBase<T>
       final String propertyKey = getPropertyKey(field);
       if (null != propertyKey) {
         field.setAccessible(true);
-        if (field.getType().isAssignableFrom(String.class)) {
+        Class<?> fieldType = field.getType();
+        if (String.class.isAssignableFrom(fieldType)) {
           propertyValues.put(propertyKey, UUID.randomUUID().toString());
+        } else if (Collection.class.isAssignableFrom(fieldType)) {
+          propertyValues.put(propertyKey, "[]");
+        } else if (Map.class.isAssignableFrom(fieldType)) {
+          propertyValues.put(propertyKey, "{}");
         } else {
-          propertyValues.put(propertyKey, field.get(fakeValues).toString());
+          propertyValues.put(propertyKey, String.valueOf(field.get(fakeValues)));
         }
       }
     }

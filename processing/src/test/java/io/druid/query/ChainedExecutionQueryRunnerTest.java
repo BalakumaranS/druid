@@ -23,11 +23,11 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.ListenableFuture;
-import com.metamx.common.guava.Sequence;
-import com.metamx.common.guava.Sequences;
-import com.metamx.common.lifecycle.Lifecycle;
-import io.druid.query.aggregation.AggregatorFactory;
+import io.druid.java.util.common.guava.Sequence;
+import io.druid.java.util.common.guava.Sequences;
+import io.druid.java.util.common.lifecycle.Lifecycle;
 import io.druid.query.aggregation.CountAggregatorFactory;
+import io.druid.query.timeseries.TimeseriesQuery;
 import org.easymock.Capture;
 import org.easymock.EasyMock;
 import org.easymock.IAnswer;
@@ -119,14 +119,12 @@ public class ChainedExecutionQueryRunnerTest
         )
     );
     Map<String, Object> context = ImmutableMap.<String, Object>of();
-    final Sequence seq = chainedRunner.run(
-        Druids.newTimeseriesQueryBuilder()
-              .dataSource("test")
-              .intervals("2014/2015")
-              .aggregators(Lists.<AggregatorFactory>newArrayList(new CountAggregatorFactory("count")))
-              .build(),
-        context
-    );
+    TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
+                                  .dataSource("test")
+                                  .intervals("2014/2015")
+                                  .aggregators(Lists.newArrayList(new CountAggregatorFactory("count")))
+                                  .build();
+    final Sequence seq = chainedRunner.run(QueryPlus.wrap(query), context);
 
     Future resultFuture = Executors.newFixedThreadPool(1).submit(
         new Runnable()
@@ -246,15 +244,13 @@ public class ChainedExecutionQueryRunnerTest
         )
     );
     HashMap<String, Object> context = new HashMap<String, Object>();
-    final Sequence seq = chainedRunner.run(
-        Druids.newTimeseriesQueryBuilder()
-              .dataSource("test")
-              .intervals("2014/2015")
-              .aggregators(Lists.<AggregatorFactory>newArrayList(new CountAggregatorFactory("count")))
-              .context(ImmutableMap.<String, Object>of(QueryContextKeys.TIMEOUT, 100, "queryId", "test"))
-              .build(),
-        context
-    );
+    TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
+                                  .dataSource("test")
+                                  .intervals("2014/2015")
+                                  .aggregators(Lists.newArrayList(new CountAggregatorFactory("count")))
+                                  .context(ImmutableMap.of(QueryContexts.TIMEOUT_KEY, 100, "queryId", "test"))
+                                  .build();
+    final Sequence seq = chainedRunner.run(QueryPlus.wrap(query), context);
 
     Future resultFuture = Executors.newFixedThreadPool(1).submit(
         new Runnable()
@@ -281,7 +277,7 @@ public class ChainedExecutionQueryRunnerTest
     }
     catch (ExecutionException e) {
       Assert.assertTrue(e.getCause() instanceof QueryInterruptedException);
-      Assert.assertEquals("Query timeout", e.getCause().getMessage());
+      Assert.assertEquals("Query timeout", ((QueryInterruptedException) e.getCause()).getErrorCode());
       cause = (QueryInterruptedException) e.getCause();
     }
     queriesInterrupted.await();
@@ -330,7 +326,7 @@ public class ChainedExecutionQueryRunnerTest
     }
 
     @Override
-    public Sequence<Integer> run(Query<Integer> query, Map<String, Object> responseContext)
+    public Sequence<Integer> run(QueryPlus<Integer> queryPlus, Map<String, Object> responseContext)
     {
       // do a lot of work
       synchronized (this) {
@@ -343,7 +339,7 @@ public class ChainedExecutionQueryRunnerTest
           interrupted = true;
           interruptedRunners.offer(this);
           stop.countDown();
-          throw new QueryInterruptedException("I got killed");
+          throw new QueryInterruptedException(e);
         }
       }
 

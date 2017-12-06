@@ -24,5 +24,6 @@ import io.druid.audit.AuditManager;
 
 public interface AuditManagerProvider extends Provider<AuditManager>
 {
-  public AuditManager get();
+  @Override
+  AuditManager get();
 }
